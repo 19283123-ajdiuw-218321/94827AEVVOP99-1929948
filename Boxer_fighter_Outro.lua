@@ -1,0 +1,3040 @@
+-- Services
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local GuiService = game:GetService("GuiService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local CultivationEvents = ReplicatedStorage:WaitForChild("CultivationEvents", 10)
+
+-------------------------------------------------------------------------
+-- CONFIG SAVE & AUTO-LOAD SYSTEM (DISCONNECT RECOVERY)
+-------------------------------------------------------------------------
+local CONFIG_FILE_NAME = "CultivationHub_SavedConfig.json"
+
+local Config = {
+    autoFarmActive = false,
+    autoPillActive = false,
+    autoBreakthroughActive = false,
+    autoQiOrbActive = false,
+    autoRealmActive = false,
+    autoBodyActive = false,
+    autoKillActive = false,
+    selectedHerb = "Ginseng",
+    selectedPill = "Qi Cultivation Pill",
+    selectedQiZone = "Verdant Valley",
+    selectedBodyZone = "Dusty Courtyard",
+    flySpeed = 60,
+    toggleKeyName = "RightShift"
+}
+
+local function saveConfig()
+    pcall(function()
+        if writefile then
+            writefile(CONFIG_FILE_NAME, HttpService:JSONEncode(Config))
+        end
+    end)
+end
+
+local function loadConfig()
+    pcall(function()
+        if isfile and readfile and isfile(CONFIG_FILE_NAME) then
+            local decoded = HttpService:JSONDecode(readfile(CONFIG_FILE_NAME))
+            if type(decoded) == "table" then
+                for k, v in pairs(decoded) do
+                    if Config[k] ~= nil and type(Config[k]) == type(v) then
+                        Config[k] = v
+                    end
+                end
+            end
+        end
+    end)
+end
+
+loadConfig()
+
+-------------------------------------------------------------------------
+-- CENTRALIZED STATE & CONSTANTS (ANTI-REGISTER LIMIT < 35 LOCALS)
+-------------------------------------------------------------------------
+local State = {
+    isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled,
+    autoFarmActive = Config.autoFarmActive,
+    autoPillActive = Config.autoPillActive,
+    autoBreakthroughActive = Config.autoBreakthroughActive,
+    autoQiOrbActive = Config.autoQiOrbActive,
+    autoRealmActive = Config.autoRealmActive,
+    autoBodyActive = Config.autoBodyActive,
+    autoKillActive = Config.autoKillActive,
+    autoSkillKillActive = true,
+    selectedHerb = Config.selectedHerb,
+    selectedPill = Config.selectedPill,
+    selectedQiZone = Config.selectedQiZone,
+    selectedBodyZone = Config.selectedBodyZone,
+    selectedTargetPlayerName = "None",
+    flySpeed = Config.flySpeed or 60,
+    minSpeed = 10,
+    maxSpeed = 300,
+    waitAtHerb = 0.8,
+    blacklistDuration = 30,
+    harvestedBlacklist = {},
+    uiVisible = true,
+    isMinimized = false,
+    isTeleportingZone = false,
+    activeFarmTween = nil,
+    activeFarmVelocity = nil,
+    toggleKey = Enum.KeyCode[Config.toggleKeyName] or Enum.KeyCode.RightShift,
+    trialNodesData = {},
+    lastSkillCycleTime = 0,
+    skillIndex = 1,
+    -- Pelacak Responsif Auto Realm (M) & Auto Body (P)
+    lastQiServerTick = 0,
+    lastBodyServerTick = 0,
+    lastRealmTrigger = 0,
+    lastBodyTrigger = 0,
+    forceImmediateCultivate = false,
+    activeRecipeSlot = 1,
+    isBrewingWaitClaim = false,
+    cauldronOrigCFrame = nil
+}
+
+local Constants = {
+    HERBS_LIST = {"Ginseng", "Azure Lotus", "Golden Fern", "Violet Sage", "Verdant Moss"},
+    PILLS_LIST = {"Bloodfury Pill", "Body Cultivation Pill", "Qi Cultivation Pill", "Vitality Pill"},
+    QI_ZONES_LIST = {
+        "Verdant Valley", "Misty Peaks", "Thunder Sanctum",
+        "Celestial Expanse", "Shattered Heavens", "Dao Pinnacle", "Shattered Sky"
+    },
+    BODY_ZONES_LIST = {
+        "Dusty Courtyard", "Iron Fist Dojo", "Stone Peak Arena",
+        "Jade Colosseum", "Dragon Spine Ridge", "Heaven's Forge", "Immortal Crucible"
+    },
+    -- Koordinat Eksak Hasil Scanner Workspace Cultivation Unbound
+    EXACT_ZONE_COORDS = {
+        -- Qi Zones
+        ["Verdant Valley"]    = Vector3.new(-190, 5, 120),
+        ["Misty Peaks"]       = Vector3.new(-1100, 112, 250),
+        ["Thunder Sanctum"]   = Vector3.new(1274, 162, -395),
+        ["Celestial Expanse"] = Vector3.new(640, 151, 1446),
+        ["Shattered Heavens"] = Vector3.new(-1520, 182, -650),
+        ["Dao Pinnacle"]      = Vector3.new(243, 1002, -785),
+        ["Shattered Sky"]     = Vector3.new(-108, 730, -1064),
+        -- Body Zones
+        ["Dusty Courtyard"]    = Vector3.new(150, 4, 40),
+        ["Iron Fist Dojo"]     = Vector3.new(795, 9, 330),
+        ["Stone Peak Arena"]   = Vector3.new(1500, 7, 650),
+        ["Jade Colosseum"]     = Vector3.new(-700, 39, 1500),
+        ["Dragon Spine Ridge"] = Vector3.new(1521, 341, -1090),
+        ["Heaven's Forge"]     = Vector3.new(1242, 8, 1449),
+        ["Immortal Crucible"]  = Vector3.new(-1480, 90, 1280)
+    },
+    PILL_RECIPES = {
+        ["Bloodfury Pill"] = {"Azure Lotus", "Golden Fern", "Violet Sage"},
+        ["Body Cultivation Pill"] = {"Verdant Moss", "Verdant Moss", "Golden Fern"},
+        ["Qi Cultivation Pill"] = {"Ginseng", "Ginseng", "Azure Lotus"},
+        ["Vitality Pill"] = {"Ginseng", "Verdant Moss", "Violet Sage"}
+    },
+    HERB_YEAR_PRIORITY = {
+        {pattern = "1000", score = 4},
+        {pattern = "100",  score = 3},
+        {pattern = "10",   score = 2},
+        {pattern = "1",    score = 1}
+    },
+    REALM_MAX_LAYERS = {
+        ["mortal body"] = 10, ["qi refining"] = 10, ["body tempering"] = 10,
+        ["foundation establishment"] = 10, ["meridian opening"] = 10, ["core formation"] = 10,
+        ["nascent soul"] = 10, ["soul transformation"] = 10, ["spirit severing"] = 10,
+        ["dao seeking"] = 10, ["dao comprehension"] = 10, ["immortal ascension"] = 10,
+        ["celestial"] = 10, ["heavenly refinement"] = 10, ["divine sense"] = 10,
+        ["ten thousand laws"] = 10, ["tribulation crossing"] = 10, ["sacred body"] = 10,
+        ["void traversal"] = 10, ["eternal spring"] = 10, ["heaven seizing"] = 10,
+        ["ten thousand dao"] = 10, ["supreme elder"] = 10,
+        ["true immortal"] = 5, ["dao ancestor"] = 5, ["void god"] = 5,
+        ["heaven defying"] = 5, ["world piercing"] = 5, ["reality shatterer"] = 5,
+        ["absolute sovereign"] = 5
+    },
+    ROMAN_TO_NUMBER = {
+        ["I"] = 1, ["II"] = 2, ["III"] = 3, ["IV"] = 4, ["V"] = 5,
+        ["VI"] = 6, ["VII"] = 7, ["VIII"] = 8, ["IX"] = 9, ["X"] = 10
+    },
+    COMBAT_SKILL_KEYS = {
+        Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.V,
+        Enum.KeyCode.G, Enum.KeyCode.H, Enum.KeyCode.T, Enum.KeyCode.Q
+    }
+}
+
+local UI = {}
+
+-------------------------------------------------------------------------
+-- CU1: LOG DE DIAGNOSTICO (SALVAR TXT / COPIAR) PARA MELHORAR O SCRIPT
+-- Tudo numa tabela global (nenhum local novo no topo). Guarda: ambiente (executor, celular ou PC, funcoes do
+-- executor), erros com traceback (os loops reiniciam em vez de morrer calados), contadores por funcao, remotes
+-- enviados e eventos do servidor recebidos, cliques na tela por metodo, teclas simuladas, toggles e o custo das
+-- varreduras da tela. Botoes na aba "Logs".
+-------------------------------------------------------------------------
+CU_LOG={version="CU1",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
+    remotes={},remoteOrder={},toggles={},startedAt=os.clock(),startedStamp=os.date("%Y-%m-%d %H:%M:%S"),
+    scans={},autoSave=true,autoSaveEvery=300,lastAutoSave=os.clock()}
+function CU_LOG.onError(e) return debug.traceback(tostring(e),2) end
+function CU_LOG.clean(text,limit)
+    return (tostring(text or ""):gsub("[\r\n]+"," "):sub(1,limit or 300))
+end
+function CU_LOG.secs(s)
+    s=math.max(0,math.floor((tonumber(s) or 0)+0.5))
+    if s>=60 then return string.format("%dm%02ds",s//60,s%60) end
+    return s.."s"
+end
+function CU_LOG.ago(t,now)
+    if not t or t<=0 then return "zerado" end
+    return string.format("%.1fs",(now or tick())-t)
+end
+function CU_LOG.add(level,area,message,minInterval,key)
+    local msg=CU_LOG.clean(message,700)
+    local k=tostring(level).."|"..tostring(area).."|"..tostring(key or msg)
+    local now=os.clock()
+    if now-(CU_LOG.lastSeen[k] or -1e9)<(minInterval or 0) then return end
+    CU_LOG.lastSeen[k]=now
+    local list=CU_LOG.entries
+    list[#list+1]=string.format("[%s] [%s] [%s] %s",os.date("%H:%M:%S"),tostring(level),tostring(area),msg)
+    if #list>6000 then table.remove(list,1) end
+end
+function CU_LOG.count(name,n)
+    local c=CU_LOG.counts
+    if c[name]==nil then c[name]=0;CU_LOG.countOrder[#CU_LOG.countOrder+1]=name end
+    c[name]+=(n or 1)
+end
+function CU_LOG.error(area,message)
+    local text=tostring(message or "")
+    local key=tostring(area).."|"..(text:match("^[^\n]*") or ""):sub(1,140)
+    local e=CU_LOG.errors[key]
+    if not e then
+        e={area=tostring(area),text=CU_LOG.clean(text,900),count=0,first=os.date("%H:%M:%S")}
+        CU_LOG.errors[key]=e
+        CU_LOG.errorOrder[#CU_LOG.errorOrder+1]=key
+    end
+    e.count+=1
+    e.last=os.date("%H:%M:%S")
+    CU_LOG.add("ERRO",area,text,10,"erro-"..key)
+end
+function CU_LOG.try(area,fn,...)
+    local ok,err=xpcall(fn,CU_LOG.onError,...)
+    if not ok then CU_LOG.error(area,err) end
+    return ok,err
+end
+-- Loop de uma funcao: um erro vai para [ERROS] e o loop recomeca em 1s (antes a tarefa morria calada).
+function CU_LOG.spawnLoop(name,body)
+    return task.spawn(function()
+        while true do
+            local ok,err=xpcall(body,CU_LOG.onError)
+            if ok then return end
+            CU_LOG.error(name,err)
+            CU_LOG.count(name..": reinicios por erro")
+            task.wait(1)
+        end
+    end)
+end
+function CU_LOG.sent(remote)
+    CU_LOG.count("Servidor (enviados): "..tostring(remote))
+end
+function CU_LOG.toggle(label,state)
+    local text=tostring(label)
+    CU_LOG.toggles[#CU_LOG.toggles+1]=string.format("[%s] %s = %s",os.date("%H:%M:%S"),text,state and "ON" or "OFF")
+    if #CU_LOG.toggles>200 then table.remove(CU_LOG.toggles,1) end
+    CU_LOG.add("TOGGLE",text,state and "ON" or "OFF")
+end
+function CU_LOG.click(method,btn,physical)
+    local label=method and (physical and (method.." + mouse VIM") or method)
+        or (physical and "mouse VIM" or "nenhum metodo (botao invisivel, menu aberto ou caixa de texto)")
+    CU_LOG.count("Cliques na tela: "..label)
+    local name="?"
+    pcall(function()
+        name=btn.Name
+        if btn:IsA("TextButton") or btn:IsA("TextLabel") then name=name.." '"..CU_LOG.clean(btn.Text,30).."'" end
+    end)
+    CU_LOG.add("CLIQUE",label,name,5,"clique-"..label.."-"..name)
+end
+function CU_LOG.key(char,ok,err)
+    CU_LOG.count("Teclas simuladas: "..tostring(char))
+    if not ok then
+        CU_LOG.count("Teclas simuladas: ERRO")
+        CU_LOG.error("Tecla VIM "..tostring(char),err)
+    end
+end
+function CU_LOG.herb(target,root,selected)
+    if not target then
+        CU_LOG.count("Ervas: nenhuma com prompt ativo (espera 1s)")
+        CU_LOG.add("ERVA","busca","nenhuma '"..tostring(selected).."' com prompt ativo (coletadas, fora do stream ou nome diferente)",15)
+        return
+    end
+    CU_LOG.count("Ervas: alvo escolhido")
+    local p=target.Prompt
+    CU_LOG.add("ERVA","alvo",string.format("%s | prompt '%s' / '%s' | %.0f studs",tostring(target.Object.Name),
+        p and tostring(p.ObjectText) or "?",p and tostring(p.ActionText) or "?",(root.Position-target.Part.Position).Magnitude),3)
+end
+function CU_LOG.hud(h)
+    if not h then return end
+    CU_LOG.count("Breakthrough: leituras da tela")
+    local key=string.format("%s|%s|%s|%s",tostring(h.realmName),tostring(h.currentLayer),tostring(h.trialMinigameActive),tostring(h.trialReadyBanner))
+    local line=string.format("reino=%s camada=%s/%s Qi=%s%% minijogo=%s banner_pronto=%s botao=%s",tostring(h.realmName),
+        tostring(h.currentLayer),tostring(h.maxLayers),tostring(h.qiPercent),tostring(h.trialMinigameActive),
+        tostring(h.trialReadyBanner),tostring(h.breakthroughBtn~=nil))
+    if key~=CU_LOG.hudLast then
+        CU_LOG.hudLast=key
+        CU_LOG.add("HUD","Breakthrough",line,0)
+    else
+        CU_LOG.add("HUD","Breakthrough",line,30,"hud-periodico")
+    end
+    if h.trialMinigameActive and not CU_LOG.trialAt then
+        CU_LOG.trialAt=os.clock()
+        CU_LOG.count("Breakthrough: minijogo aberto")
+    elseif not h.trialMinigameActive and CU_LOG.trialAt then
+        CU_LOG.add("TRIAL","fim",string.format("minijogo durou %.1fs",os.clock()-CU_LOG.trialAt),0)
+        CU_LOG.trialAt=nil
+    end
+end
+function CU_LOG.argText(...)
+    local n=select("#",...)
+    local parts={}
+    for i=1,math.min(n,6) do
+        local v=select(i,...)
+        local t=typeof(v)
+        if t=="Instance" then
+            parts[#parts+1]=v.ClassName..":"..v.Name
+        elseif t=="table" then
+            local kv={}
+            for k,val in pairs(v) do
+                kv[#kv+1]=tostring(k).."="..CU_LOG.clean(tostring(val),24)
+                if #kv>=6 then break end
+            end
+            parts[#parts+1]="{"..table.concat(kv,",").."}"
+        else
+            parts[#parts+1]=CU_LOG.clean(tostring(v),40)
+        end
+    end
+    if n>6 then parts[#parts+1]="...+"..(n-6) end
+    return CU_LOG.clean(table.concat(parts,", "),220)
+end
+-- Espiao passivo: cada RemoteEvent de CultivationEvents recebido do servidor (quantas vezes, quando, argumentos).
+function CU_LOG.watchRemotes(folder)
+    if not folder then
+        CU_LOG.add("AVISO","Servidor","ReplicatedStorage.CultivationEvents nao apareceu em 10s: as funcoes que usam remotes nao vao funcionar")
+        return
+    end
+    local names={}
+    for _,r in ipairs(folder:GetDescendants()) do
+        if r:IsA("RemoteEvent") then
+            names[#names+1]=r.Name
+            r.OnClientEvent:Connect(function(...)
+                local rec=CU_LOG.remotes[r.Name]
+                if not rec then
+                    rec={count=0}
+                    CU_LOG.remotes[r.Name]=rec
+                    CU_LOG.remoteOrder[#CU_LOG.remoteOrder+1]=r.Name
+                end
+                rec.count+=1
+                rec.last=os.date("%H:%M:%S")
+                local ok,args=pcall(CU_LOG.argText,...)
+                rec.args=ok and args or "?"
+                if rec.count<=3 then CU_LOG.add("SERVIDOR",r.Name,"recebido #"..rec.count..": "..rec.args) end
+            end)
+        elseif r:IsA("RemoteFunction") then
+            names[#names+1]=r.Name.."(funcao)"
+        end
+    end
+    table.sort(names)
+    CU_LOG.remoteList=names
+    CU_LOG.add("INFO","Servidor",#names.." remotes em CultivationEvents: "..table.concat(names,", "))
+end
+function CU_LOG.env()
+    local caps={}
+    local function has(name,v) caps[#caps+1]=name.."="..((v~=nil and v~=false) and "sim" or "NAO") end
+    local okE,ename,ever=pcall(function() if identifyexecutor then return identifyexecutor() end end)
+    caps[#caps+1]="executor="..((okE and ename) and (tostring(ename)..(ever and (" "..tostring(ever)) or "")) or "desconhecido")
+    has("getconnections",getconnections)
+    has("firesignal",firesignal)
+    has("fireproximityprompt",fireproximityprompt)
+    has("writefile",writefile)
+    has("readfile",readfile)
+    has("isfile",isfile)
+    has("delfile",delfile)
+    has("setclipboard",setclipboard or toclipboard)
+    has("gethui",gethui)
+    has("syn.protect_gui",syn and syn.protect_gui)
+    local vp=Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
+    local plat=string.format("toque=%s teclado=%s mouse=%s | isMobile do script=%s (janela %s) | tela=%s",
+        tostring(UserInputService.TouchEnabled),tostring(UserInputService.KeyboardEnabled),tostring(UserInputService.MouseEnabled),
+        tostring(State.isMobile),State.isMobile and "440x340" or "540x470",vp and string.format("%dx%d",vp.X,vp.Y) or "?")
+    return table.concat(caps," | "),plat
+end
+function CU_LOG.activeList()
+    local out={}
+    for _,p in ipairs({{"autoFarmActive","Ervas"},{"autoPillActive","Pilulas"},{"autoRealmActive","Auto Realm"},
+        {"autoBodyActive","Auto Body"},{"autoBreakthroughActive","Breakthrough"},{"autoQiOrbActive","Qi Orb"},{"autoKillActive","Auto Kill"}}) do
+        if State[p[1]] then out[#out+1]=p[2] end
+    end
+    return #out>0 and table.concat(out,", ") or "nenhuma"
+end
+function CU_LOG.summary()
+    local groups,order={},{}
+    for _,name in ipairs(CU_LOG.countOrder) do
+        local g,item=name:match("^(.-):%s*(.+)$")
+        g=g or "Outros"
+        item=item or name
+        if not groups[g] then groups[g]={};order[#order+1]=g end
+        local list=groups[g]
+        list[#list+1]=item.." "..CU_LOG.counts[name]
+    end
+    local out={"[RESUMO POR FUNCAO: contadores desde o carregamento]"}
+    if #order==0 then out[#out+1]="(nada contado ainda)" end
+    for _,g in ipairs(order) do out[#out+1]=g..": "..table.concat(groups[g],", ") end
+    return table.concat(out,"\n").."\n\n"
+end
+function CU_LOG.errorDump()
+    if #CU_LOG.errorOrder==0 then return "[ERROS: nenhum erro do script registrado nesta sessao]\n\n" end
+    local out={string.format("[ERROS: %d tipo(s); a funcao com erro pode ter parado ou reiniciado. Mande este TXT.]",#CU_LOG.errorOrder)}
+    for _,key in ipairs(CU_LOG.errorOrder) do
+        local e=CU_LOG.errors[key]
+        out[#out+1]=string.format("[%s..%s] x%d %s: %s",e.first,e.last or e.first,e.count,e.area,e.text)
+    end
+    return table.concat(out,"\n").."\n\n"
+end
+function CU_LOG.remoteDump()
+    if #CU_LOG.remoteOrder==0 then return "[EVENTOS DO SERVIDOR RECEBIDOS: nenhum ainda]\n\n" end
+    local out={"[EVENTOS DO SERVIDOR RECEBIDOS: quantas vezes, ultimo horario e ultimos argumentos]"}
+    for _,name in ipairs(CU_LOG.remoteOrder) do
+        local r=CU_LOG.remotes[name]
+        out[#out+1]=string.format("%s x%d (ultimo %s): %s",name,r.count,r.last or "?",r.args or "")
+    end
+    return table.concat(out,"\n").."\n\n"
+end
+function CU_LOG.scanText()
+    local s=CU_LOG.scans
+    if #s==0 then return "varredura da tela: ainda nao medida" end
+    local last,total,maxMs=s[#s],0,0
+    for _,x in ipairs(s) do
+        total+=x.ms
+        if x.ms>maxMs then maxMs=x.ms end
+    end
+    return string.format("varredura da tela: %d objetos, %d textos visiveis; uma varredura leva %.0f ms (media %.0f, maior %.0f, %d medicoes). Rotinas que varrem: Realm/Body a cada 0,15s, Pilulas 0,28s (varias buscas), Breakthrough 0,25s e a cada frame no minijogo, Qi Orb 0,12s",
+        last.objects,last.texts,last.ms,total/#s,maxMs,#s)
+end
+function CU_LOG.dump(compact)
+    local envCaps,envPlat=CU_LOG.env()
+    local header=string.format("Cultivation Unbound | Diagnostico %s | %s\nCarregado em %s (%s de sessao) | Funcoes ligadas: %s\nSelecionados: erva=%s, pilula=%s, zona Qi=%s, zona corpo=%s, alvo=%s, velocidade de voo=%s\n[AMBIENTE] %s\n[AMBIENTE] %s\n[AMBIENTE] %s\n[AMBIENTE] remotes: %s\n\n",
+        CU_LOG.version,os.date("%Y-%m-%d %H:%M:%S"),CU_LOG.startedStamp,CU_LOG.secs(os.clock()-CU_LOG.startedAt),CU_LOG.activeList(),
+        tostring(State.selectedHerb),tostring(State.selectedPill),tostring(State.selectedQiZone),tostring(State.selectedBodyZone),
+        tostring(State.selectedTargetPlayerName),tostring(State.flySpeed),
+        envCaps,envPlat,CU_LOG.scanText(),CU_LOG.remoteList and table.concat(CU_LOG.remoteList,", ") or "?")
+    local toggles=#CU_LOG.toggles>0 and ("[TOGGLES: liga/desliga em ordem]\n"..table.concat(CU_LOG.toggles,"\n").."\n\n") or ""
+    local body=header..CU_LOG.errorDump()..CU_LOG.summary()..CU_LOG.remoteDump()..toggles
+    local list=CU_LOG.entries
+    if not compact then
+        return body.."[EVENTOS: "..#list.." linhas]\n"..table.concat(list,"\n")
+    end
+    local budget=math.max(2000,15000-#body)
+    local recent,used={},0
+    for i=#list,1,-1 do
+        if used+#list[i]+1>budget then break end
+        table.insert(recent,1,list[i])
+        used+=#list[i]+1
+    end
+    return body.."[ULTIMOS EVENTOS: "..#recent.."/"..#list.."; o TXT tem todos]\n"..table.concat(recent,"\n")
+end
+function CU_LOG.save(name)
+    if not writefile then return false,"este executor nao tem writefile" end
+    local file=name or ("CultivationHub_log_"..os.date("%Y%m%d_%H%M%S")..".txt")
+    local ok,err=pcall(writefile,file,CU_LOG.dump(false))
+    if not ok then
+        CU_LOG.error("Salvar TXT",err)
+        return false,tostring(err)
+    end
+    CU_LOG.add("INFO","Log","TXT salvo: "..file,0)
+    return true,file
+end
+function CU_LOG.copy()
+    local clip=setclipboard or toclipboard
+    if not clip then return false,"este executor nao tem setclipboard" end
+    local text=CU_LOG.dump(true)
+    local ok,err=pcall(clip,text)
+    if not ok then
+        CU_LOG.error("Copiar log",err)
+        return false,tostring(err)
+    end
+    return true,#text
+end
+CU_LOG.add("INFO","Inicio","Cultivation Hub carregado com o log "..CU_LOG.version)
+
+-------------------------------------------------------------------------
+-- UI & INPUT HELPER FUNCTIONS
+-------------------------------------------------------------------------
+local function addCorner(parent, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius or 6)
+    c.Parent = parent
+    return c
+end
+
+local function addStroke(parent, color, thickness)
+    local s = Instance.new("UIStroke")
+    s.Color = color
+    s.Thickness = thickness or 1
+    s.Parent = parent
+    return s
+end
+
+local function makeDraggable(dragTrigger, targetFrame)
+    local dragging = false
+    local dragInput, dragStart, startPos
+
+    dragTrigger.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = targetFrame.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    dragTrigger.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            targetFrame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+local function createToggleRow(parent, posY, labelText, initialState, activeColor, onToggle)
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(0.96, 0, 0, 38)
+    container.Position = UDim2.new(0, 0, 0, posY)
+    container.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+    container.Parent = parent
+    addCorner(container, 6)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0.65, 0, 1, 0)
+    lbl.Position = UDim2.new(0, 10, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = labelText
+    lbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+    lbl.TextSize = 12
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = container
+
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0, 44, 0, 22)
+    switchBg.Position = UDim2.new(1, -54, 0.5, -11)
+    switchBg.Parent = container
+    local c1 = Instance.new("UICorner")
+    c1.CornerRadius = UDim.new(1, 0)
+    c1.Parent = switchBg
+
+    local switchCircle = Instance.new("Frame")
+    switchCircle.Size = UDim2.new(0, 18, 0, 18)
+    switchCircle.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+    switchCircle.Parent = switchBg
+    local c2 = Instance.new("UICorner")
+    c2.CornerRadius = UDim.new(1, 0)
+    c2.Parent = switchCircle
+
+    local onCol = activeColor or Color3.fromRGB(60, 180, 80)
+    local offCol = Color3.fromRGB(60, 50, 65)
+
+    local currentState = initialState
+    local function setVisual(st)
+        currentState = st
+        TweenService:Create(switchBg, TweenInfo.new(0.2), {BackgroundColor3 = st and onCol or offCol}):Play()
+        TweenService:Create(switchCircle, TweenInfo.new(0.2), {Position = st and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}):Play()
+    end
+
+    switchBg.BackgroundColor3 = initialState and onCol or offCol
+    switchCircle.Position = initialState and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
+
+    local trigger = Instance.new("TextButton")
+    trigger.Size = UDim2.new(1, 0, 1, 0)
+    trigger.BackgroundTransparency = 1
+    trigger.Text = ""
+    trigger.ZIndex = 2
+    trigger.Parent = container
+
+    trigger.Activated:Connect(function()
+        setVisual(not currentState)
+        CU_LOG.toggle(labelText, currentState)
+        if onToggle then
+            CU_LOG.try("Toggle " .. tostring(labelText), onToggle, currentState)
+        end
+    end)
+
+    return container, setVisual
+end
+
+local function trimText(str)
+    return (str or ""):match("^%s*(.-)%s*$"):lower()
+end
+
+local function normalizeName(str)
+    return (str or ""):lower():gsub("[%s%p_]+", "")
+end
+
+local function isUserTypingOrInMenu()
+    return (UserInputService:GetFocusedTextBox() ~= nil) or GuiService.MenuIsOpen
+end
+
+local function isActuallyVisible(guiObj)
+    if not guiObj or not guiObj:IsA("GuiObject") then return false end
+    if guiObj.AbsoluteSize.X <= 2 or guiObj.AbsoluteSize.Y <= 2 then return false end
+    local curr = guiObj
+    while curr and curr ~= LocalPlayer.PlayerGui do
+        if curr:IsA("GuiObject") and not curr.Visible then
+            return false
+        elseif curr:IsA("ScreenGui") and not curr.Enabled then
+            return false
+        end
+        curr = curr.Parent
+    end
+    return true
+end
+
+-- Klik GUI Bersih (1x Eksekusi Tanpa Spam Ganda)
+local function triggerGuiClick(element, instantRelease, allowPhysicalFallback)
+    if not element then return end
+    local btn = element:IsA("GuiButton") and element
+        or element:FindFirstAncestorWhichIsA("GuiButton")
+        or element:FindFirstChildWhichIsA("GuiButton", true)
+        or element
+
+    local signalHandled = false
+
+    pcall(function()
+        if getconnections and btn:IsA("GuiButton") then
+            local c1 = getconnections(btn.MouseButton1Click)
+            if c1 and #c1 > 0 then
+                for _, conn in ipairs(c1) do
+                    conn:Fire()
+                    signalHandled = true
+                end
+            end
+            if not signalHandled then
+                local c2 = getconnections(btn.Activated)
+                if c2 and #c2 > 0 then
+                    for _, conn in ipairs(c2) do
+                        conn:Fire()
+                        signalHandled = true
+                    end
+                end
+            end
+        end
+    end)
+
+    local cuViaConnections = signalHandled
+    if not signalHandled then
+        pcall(function()
+            if firesignal and btn:IsA("GuiButton") then
+                firesignal(btn.MouseButton1Click)
+                signalHandled = true
+            end
+        end)
+    end
+
+    -- Jika executor tidak mengeksekusi firesignal/getconnections, gunakan 1x klik koordinat tombol
+    local cuPhysical = false
+    if (not signalHandled or allowPhysicalFallback) and not isUserTypingOrInMenu() and isActuallyVisible(btn) then
+        cuPhysical = true
+        pcall(function()
+            local inset = GuiService:GetGuiInset()
+            local pos = btn.AbsolutePosition
+            local size = btn.AbsoluteSize
+            local centerX = pos.X + (size.X / 2)
+            local centerY = pos.Y + (size.Y / 2) + inset.Y
+
+            VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, true, game, 1)
+            if not instantRelease then task.wait(0.02) end
+            VirtualInputManager:SendMouseButtonEvent(centerX, centerY, 0, false, game, 1)
+        end)
+    end
+    CU_LOG.click(cuViaConnections and "getconnections" or (signalHandled and "firesignal" or nil), btn, cuPhysical)
+end
+
+local function triggerKeyPress(charStr)
+    if isUserTypingOrInMenu() then return end
+    local upperChar = charStr:upper():match("^[A-Z]$")
+    if not upperChar then return end
+    local keyCode = Enum.KeyCode[upperChar]
+    if not keyCode then return end
+
+    local okKey, errKey = pcall(function()
+        VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
+        task.wait(0.03)
+        VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+    end)
+    CU_LOG.key(upperChar, okKey, errKey)
+end
+
+-------------------------------------------------------------------------
+-- BUILD MAIN WINDOW & SIDEBAR
+-------------------------------------------------------------------------
+do
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "CultivationHubGui"
+    screenGui.ResetOnSpawn = false
+    screenGui.IgnoreGuiInset = false
+
+    if syn and syn.protect_gui then
+        syn.protect_gui(screenGui)
+        screenGui.Parent = game:GetService("CoreGui")
+    elseif gethui then
+        screenGui.Parent = gethui()
+    else
+        screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+    UI.ScreenGui = screenGui
+
+    local floatingBtn = Instance.new("TextButton")
+    floatingBtn.Name = "MobileToggleBtn"
+    floatingBtn.Size = UDim2.new(0, 48, 0, 48)
+    floatingBtn.Position = UDim2.new(0.02, 0, 0.45, 0)
+    floatingBtn.BackgroundColor3 = Color3.fromRGB(45, 32, 58)
+    floatingBtn.Text = "HUB"
+    floatingBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    floatingBtn.TextSize = 13
+    floatingBtn.Font = Enum.Font.GothamBold
+    floatingBtn.ZIndex = 50
+    floatingBtn.Parent = screenGui
+    local fc = Instance.new("UICorner")
+    fc.CornerRadius = UDim.new(1, 0)
+    fc.Parent = floatingBtn
+    addStroke(floatingBtn, Color3.fromRGB(210, 50, 70), 2)
+    makeDraggable(floatingBtn, floatingBtn)
+
+    local frameW = State.isMobile and 440 or 540
+    local frameH = State.isMobile and 340 or 470
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, frameW, 0, frameH)
+    mainFrame.Position = UDim2.new(0.5, -(frameW / 2), 0.5, -(frameH / 2))
+    mainFrame.BackgroundColor3 = Color3.fromRGB(22, 18, 26)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Parent = screenGui
+    addCorner(mainFrame, 8)
+    UI.MainFrame = mainFrame
+
+    local uiScale = Instance.new("UIScale")
+    local vp = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+    uiScale.Scale = (vp.Y < 500) and 0.78 or ((vp.Y < 720 and State.isMobile) and 0.88 or 1.0)
+    uiScale.Parent = mainFrame
+
+    local topBar = Instance.new("Frame")
+    topBar.Size = UDim2.new(1, 0, 0, 36)
+    topBar.BackgroundColor3 = Color3.fromRGB(18, 14, 22)
+    topBar.BorderSizePixel = 0
+    topBar.Parent = mainFrame
+    addCorner(topBar, 8)
+    makeDraggable(topBar, mainFrame)
+
+    local titleText = Instance.new("TextLabel")
+    titleText.Size = UDim2.new(1, -100, 1, 0)
+    titleText.Position = UDim2.new(0, 15, 0, 0)
+    titleText.BackgroundTransparency = 1
+    titleText.Text = "Cultivation Hub (Auto-Save Config) | Log CU1"
+    titleText.TextColor3 = Color3.fromRGB(220, 220, 220)
+    titleText.TextSize = 14
+    titleText.Font = Enum.Font.GothamBold
+    titleText.TextXAlignment = Enum.TextXAlignment.Left
+    titleText.Parent = topBar
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 26, 0, 26)
+    closeBtn.Position = UDim2.new(1, -32, 0.5, -13)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+    closeBtn.Text = "X"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeBtn.TextSize = 12
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.Parent = topBar
+    addCorner(closeBtn, 4)
+
+    local minimizeBtn = Instance.new("TextButton")
+    minimizeBtn.Size = UDim2.new(0, 26, 0, 26)
+    minimizeBtn.Position = UDim2.new(1, -64, 0.5, -13)
+    minimizeBtn.BackgroundColor3 = Color3.fromRGB(50, 40, 60)
+    minimizeBtn.Text = "-"
+    minimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minimizeBtn.TextSize = 14
+    minimizeBtn.Font = Enum.Font.GothamBold
+    minimizeBtn.Parent = topBar
+    addCorner(minimizeBtn, 4)
+
+    local sidebarW = State.isMobile and 110 or 135
+    local sidebar = Instance.new("Frame")
+    sidebar.Size = UDim2.new(0, sidebarW, 1, -36)
+    sidebar.Position = UDim2.new(0, 0, 0, 36)
+    sidebar.BackgroundColor3 = Color3.fromRGB(28, 22, 34)
+    sidebar.BorderSizePixel = 0
+    sidebar.Parent = mainFrame
+    addCorner(sidebar, 6)
+
+    local contentArea = Instance.new("Frame")
+    contentArea.Size = UDim2.new(1, -(sidebarW + 10), 1, -46)
+    contentArea.Position = UDim2.new(0, sidebarW + 5, 0, 41)
+    contentArea.BackgroundTransparency = 1
+    contentArea.Parent = mainFrame
+
+    local autoPage = Instance.new("ScrollingFrame")
+    autoPage.Size = UDim2.new(1, 0, 1, 0)
+    autoPage.BackgroundTransparency = 1
+    autoPage.CanvasSize = UDim2.new(0, 0, 0, 840)
+    autoPage.ScrollBarThickness = 5
+    autoPage.ScrollingDirection = Enum.ScrollingDirection.Y
+    autoPage.Visible = true
+    autoPage.Parent = contentArea
+    UI.AutoPage = autoPage
+
+    local locationPage = Instance.new("ScrollingFrame")
+    locationPage.Size = UDim2.new(1, 0, 1, 0)
+    locationPage.BackgroundTransparency = 1
+    locationPage.CanvasSize = UDim2.new(0, 0, 0, 360)
+    locationPage.ScrollBarThickness = 5
+    locationPage.ScrollingDirection = Enum.ScrollingDirection.Y
+    locationPage.Visible = false
+    locationPage.Parent = contentArea
+    UI.LocationPage = locationPage
+
+    local settingPage = Instance.new("Frame")
+    settingPage.Size = UDim2.new(1, 0, 1, 0)
+    settingPage.BackgroundTransparency = 1
+    settingPage.Visible = false
+    settingPage.Parent = contentArea
+    UI.SettingPage = settingPage
+
+    local function makeTabBtn(text, posY, isDefault)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0.9, 0, 0, 32)
+        b.Position = UDim2.new(0.05, 0, 0, posY)
+        b.BackgroundColor3 = isDefault and Color3.fromRGB(45, 32, 58) or Color3.fromRGB(28, 22, 34)
+        b.Text = text
+        b.TextColor3 = isDefault and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(160, 160, 160)
+        b.TextSize = 13
+        b.Font = Enum.Font.GothamMedium
+        b.Parent = sidebar
+        addCorner(b, 4)
+        return b
+    end
+
+    local autoTabBtn = makeTabBtn("Auto", 10, true)
+    local locationTabBtn = makeTabBtn("Location", 48, false)
+    local settingTabBtn = makeTabBtn("Setting", 86, false)
+    local logsTabBtn = makeTabBtn("Logs", 124, false)
+    local logsPage = Instance.new("ScrollingFrame")
+    logsPage.Size = UDim2.new(1, 0, 1, 0)
+    logsPage.BackgroundTransparency = 1
+    logsPage.CanvasSize = UDim2.new(0, 0, 0, 330)
+    logsPage.ScrollBarThickness = 5
+    logsPage.ScrollingDirection = Enum.ScrollingDirection.Y
+    logsPage.Visible = false
+    logsPage.Parent = contentArea
+    UI.LogsPage = logsPage
+
+    local function switchTab(tabName)
+        autoPage.Visible = (tabName == "Auto")
+        locationPage.Visible = (tabName == "Location")
+        settingPage.Visible = (tabName == "Setting")
+
+        autoTabBtn.BackgroundColor3 = (tabName == "Auto") and Color3.fromRGB(45, 32, 58) or Color3.fromRGB(28, 22, 34)
+        autoTabBtn.TextColor3 = (tabName == "Auto") and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(160, 160, 160)
+
+        locationTabBtn.BackgroundColor3 = (tabName == "Location") and Color3.fromRGB(45, 32, 58) or Color3.fromRGB(28, 22, 34)
+        locationTabBtn.TextColor3 = (tabName == "Location") and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(160, 160, 160)
+
+        settingTabBtn.BackgroundColor3 = (tabName == "Setting") and Color3.fromRGB(45, 32, 58) or Color3.fromRGB(28, 22, 34)
+        settingTabBtn.TextColor3 = (tabName == "Setting") and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(160, 160, 160)
+
+        logsPage.Visible = (tabName == "Logs")
+        logsTabBtn.BackgroundColor3 = (tabName == "Logs") and Color3.fromRGB(45, 32, 58) or Color3.fromRGB(28, 22, 34)
+        logsTabBtn.TextColor3 = (tabName == "Logs") and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(160, 160, 160)
+    end
+
+    autoTabBtn.Activated:Connect(function() switchTab("Auto") end)
+    locationTabBtn.Activated:Connect(function() switchTab("Location") end)
+    settingTabBtn.Activated:Connect(function() switchTab("Setting") end)
+    logsTabBtn.Activated:Connect(function() switchTab("Logs") end)
+
+    floatingBtn.Activated:Connect(function()
+        State.uiVisible = not State.uiVisible
+        mainFrame.Visible = State.uiVisible
+    end)
+
+    closeBtn.Activated:Connect(function()
+        State.autoFarmActive = false
+        State.autoPillActive = false
+        State.autoBreakthroughActive = false
+        State.autoQiOrbActive = false
+        State.autoRealmActive = false
+        State.autoBodyActive = false
+        State.autoKillActive = false
+        screenGui:Destroy()
+    end)
+
+    minimizeBtn.Activated:Connect(function()
+        State.isMinimized = not State.isMinimized
+        sidebar.Visible = not State.isMinimized
+        contentArea.Visible = not State.isMinimized
+        mainFrame.Size = State.isMinimized and UDim2.new(0, frameW, 0, 36) or UDim2.new(0, frameW, 0, frameH)
+        minimizeBtn.Text = State.isMinimized and "+" or "-"
+    end)
+end
+
+-------------------------------------------------------------------------
+-- BUILD PAGE 1: AUTO CATALOG
+-------------------------------------------------------------------------
+do
+    local page = UI.AutoPage
+
+    local function addSectionHeader(text, posY, color)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, 0, 0, 20)
+        lbl.Position = UDim2.new(0, 0, 0, posY)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = color or Color3.fromRGB(180, 180, 180)
+        lbl.TextSize = 12
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = page
+    end
+
+    -- 1. FARM HERBS
+    addSectionHeader("Farm Herbs (Priority: 1000Yr > 100Yr > 10Yr > 1Yr)", 0)
+
+    local herbDropContainer = Instance.new("Frame")
+    herbDropContainer.Size = UDim2.new(0.96, 0, 0, 38)
+    herbDropContainer.Position = UDim2.new(0, 0, 0, 25)
+    herbDropContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+    herbDropContainer.ZIndex = 6
+    herbDropContainer.Parent = page
+    addCorner(herbDropContainer, 6)
+
+    local herbDropLabel = Instance.new("TextLabel")
+    herbDropLabel.Size = UDim2.new(0.48, 0, 1, 0)
+    herbDropLabel.Position = UDim2.new(0, 10, 0, 0)
+    herbDropLabel.BackgroundTransparency = 1
+    herbDropLabel.Text = "Select Herb"
+    herbDropLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    herbDropLabel.TextSize = 12
+    herbDropLabel.Font = Enum.Font.Gotham
+    herbDropLabel.TextXAlignment = Enum.TextXAlignment.Left
+    herbDropLabel.ZIndex = 6
+    herbDropLabel.Parent = herbDropContainer
+
+    local herbDropBtn = Instance.new("TextButton")
+    herbDropBtn.Size = UDim2.new(0.46, 0, 0.72, 0)
+    herbDropBtn.Position = UDim2.new(0.51, 0, 0.14, 0)
+    herbDropBtn.BackgroundColor3 = Color3.fromRGB(50, 40, 60)
+    herbDropBtn.Text = State.selectedHerb .. " ▾"
+    herbDropBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    herbDropBtn.TextSize = 11
+    herbDropBtn.Font = Enum.Font.GothamBold
+    herbDropBtn.ZIndex = 7
+    herbDropBtn.Parent = herbDropContainer
+    addCorner(herbDropBtn, 4)
+
+    local herbDropList = Instance.new("ScrollingFrame")
+    herbDropList.Size = UDim2.new(1, 0, 0, 110)
+    herbDropList.Position = UDim2.new(0, 0, 1, 4)
+    herbDropList.BackgroundColor3 = Color3.fromRGB(40, 32, 48)
+    herbDropList.Visible = false
+    herbDropList.ZIndex = 20
+    herbDropList.CanvasSize = UDim2.new(0, 0, 0, 155)
+    herbDropList.ScrollBarThickness = 4
+    herbDropList.Parent = herbDropBtn
+    addCorner(herbDropList, 4)
+
+    for i, herbName in ipairs(Constants.HERBS_LIST) do
+        local optBtn = Instance.new("TextButton")
+        optBtn.Size = UDim2.new(1, -5, 0, 28)
+        optBtn.Position = UDim2.new(0, 0, 0, (i - 1) * 30)
+        optBtn.BackgroundTransparency = 1
+        optBtn.Text = herbName
+        optBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+        optBtn.TextSize = 11
+        optBtn.Font = Enum.Font.Gotham
+        optBtn.ZIndex = 21
+        optBtn.Parent = herbDropList
+
+        optBtn.Activated:Connect(function()
+            State.selectedHerb = herbName
+            Config.selectedHerb = herbName
+            herbDropBtn.Text = herbName .. " ▾"
+            herbDropList.Visible = false
+            saveConfig()
+        end)
+    end
+
+    createToggleRow(page, 70, "autofarm herb", State.autoFarmActive, nil, function(val)
+        State.autoFarmActive = val
+        Config.autoFarmActive = val
+        if not val and State.activeFarmTween then
+            pcall(function() State.activeFarmTween:Cancel() end)
+        end
+        saveConfig()
+    end)
+
+    -- Speed Slider
+    local sliderContainer = Instance.new("Frame")
+    sliderContainer.Size = UDim2.new(0.96, 0, 0, 54)
+    sliderContainer.Position = UDim2.new(0, 0, 0, 115)
+    sliderContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+    sliderContainer.Parent = page
+    addCorner(sliderContainer, 6)
+
+    local sliderLabel = Instance.new("TextLabel")
+    sliderLabel.Size = UDim2.new(0.6, 0, 0, 25)
+    sliderLabel.Position = UDim2.new(0, 10, 0, 4)
+    sliderLabel.BackgroundTransparency = 1
+    sliderLabel.Text = "Fly Speed"
+    sliderLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    sliderLabel.TextSize = 12
+    sliderLabel.Font = Enum.Font.Gotham
+    sliderLabel.TextXAlignment = Enum.TextXAlignment.Left
+    sliderLabel.Parent = sliderContainer
+
+    local speedInputBox = Instance.new("TextBox")
+    speedInputBox.Size = UDim2.new(0, 48, 0, 22)
+    speedInputBox.Position = UDim2.new(1, -58, 0, 5)
+    speedInputBox.BackgroundColor3 = Color3.fromRGB(45, 36, 54)
+    speedInputBox.Text = tostring(State.flySpeed)
+    speedInputBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    speedInputBox.TextSize = 12
+    speedInputBox.Font = Enum.Font.GothamBold
+    speedInputBox.Parent = sliderContainer
+    addCorner(speedInputBox, 4)
+
+    local sliderBar = Instance.new("Frame")
+    sliderBar.Size = UDim2.new(0.9, 0, 0, 8)
+    sliderBar.Position = UDim2.new(0.05, 0, 0, 36)
+    sliderBar.BackgroundColor3 = Color3.fromRGB(20, 16, 24)
+    sliderBar.BorderSizePixel = 0
+    sliderBar.Parent = sliderContainer
+    addCorner(sliderBar, 8)
+
+    local sliderFill = Instance.new("Frame")
+    sliderFill.Size = UDim2.new((State.flySpeed - State.minSpeed) / (State.maxSpeed - State.minSpeed), 0, 1, 0)
+    sliderFill.BackgroundColor3 = Color3.fromRGB(210, 50, 70)
+    sliderFill.BorderSizePixel = 0
+    sliderFill.Parent = sliderBar
+    addCorner(sliderFill, 8)
+
+    local sliderBtn = Instance.new("TextButton")
+    sliderBtn.Size = UDim2.new(1, 16, 1, 20)
+    sliderBtn.Position = UDim2.new(0, -8, 0, -10)
+    sliderBtn.BackgroundTransparency = 1
+    sliderBtn.Text = ""
+    sliderBtn.Parent = sliderBar
+
+    local function updateSpeed(val)
+        State.flySpeed = math.clamp(math.round(val), State.minSpeed, State.maxSpeed)
+        Config.flySpeed = State.flySpeed
+        speedInputBox.Text = tostring(State.flySpeed)
+        sliderFill.Size = UDim2.new((State.flySpeed - State.minSpeed) / (State.maxSpeed - State.minSpeed), 0, 1, 0)
+        saveConfig()
+    end
+
+    local draggingSlider = false
+    sliderBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingSlider = true
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingSlider = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local pct = math.clamp((input.Position.X - sliderBar.AbsolutePosition.X) / sliderBar.AbsoluteSize.X, 0, 1)
+            updateSpeed(State.minSpeed + (pct * (State.maxSpeed - State.minSpeed)))
+        end
+    end)
+    speedInputBox.FocusLost:Connect(function()
+        local num = tonumber(speedInputBox.Text)
+        if num then updateSpeed(num) else speedInputBox.Text = tostring(State.flySpeed) end
+    end)
+
+    -- 2. AUTOCREATE PILLS (ZERO-LAG + EXACT 3-COLUMN SLOT + INSTANT CLAIM)
+    addSectionHeader("Auto Create Pills (Zero-Lag + Anywhere + Instant Claim)", 180)
+
+    local pillDropContainer = Instance.new("Frame")
+    pillDropContainer.Size = UDim2.new(0.96, 0, 0, 38)
+    pillDropContainer.Position = UDim2.new(0, 0, 0, 205)
+    pillDropContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+    pillDropContainer.ZIndex = 4
+    pillDropContainer.Parent = page
+    addCorner(pillDropContainer, 6)
+
+    local pillDropLabel = Instance.new("TextLabel")
+    pillDropLabel.Size = UDim2.new(0.45, 0, 1, 0)
+    pillDropLabel.Position = UDim2.new(0, 10, 0, 0)
+    pillDropLabel.BackgroundTransparency = 1
+    pillDropLabel.Text = "Select Pill Recipe"
+    pillDropLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    pillDropLabel.TextSize = 12
+    pillDropLabel.Font = Enum.Font.Gotham
+    pillDropLabel.TextXAlignment = Enum.TextXAlignment.Left
+    pillDropLabel.ZIndex = 4
+    pillDropLabel.Parent = pillDropContainer
+
+    local pillDropBtn = Instance.new("TextButton")
+    pillDropBtn.Size = UDim2.new(0.5, 0, 0.72, 0)
+    pillDropBtn.Position = UDim2.new(0.47, 0, 0.14, 0)
+    pillDropBtn.BackgroundColor3 = Color3.fromRGB(50, 40, 60)
+    pillDropBtn.Text = State.selectedPill .. " ▾"
+    pillDropBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    pillDropBtn.TextSize = 10
+    pillDropBtn.Font = Enum.Font.GothamBold
+    pillDropBtn.ZIndex = 5
+    pillDropBtn.Parent = pillDropContainer
+    addCorner(pillDropBtn, 4)
+
+    local pillDropList = Instance.new("Frame")
+    pillDropList.Size = UDim2.new(1, 0, 0, 112)
+    pillDropList.Position = UDim2.new(0, 0, 1, 4)
+    pillDropList.BackgroundColor3 = Color3.fromRGB(40, 32, 48)
+    pillDropList.Visible = false
+    pillDropList.ZIndex = 18
+    pillDropList.Parent = pillDropBtn
+    addCorner(pillDropList, 4)
+
+    for i, pillName in ipairs(Constants.PILLS_LIST) do
+        local optBtn = Instance.new("TextButton")
+        optBtn.Size = UDim2.new(1, -5, 0, 26)
+        optBtn.Position = UDim2.new(0, 0, 0, (i - 1) * 27)
+        optBtn.BackgroundTransparency = 1
+        optBtn.Text = pillName
+        optBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+        optBtn.TextSize = 10
+        optBtn.Font = Enum.Font.Gotham
+        optBtn.ZIndex = 19
+        optBtn.Parent = pillDropList
+
+        optBtn.Activated:Connect(function()
+            State.selectedPill = pillName
+            Config.selectedPill = pillName
+            pillDropBtn.Text = pillName .. " ▾"
+            pillDropList.Visible = false
+            saveConfig()
+        end)
+    end
+
+    createToggleRow(page, 250, "Autocreate pills (Anywhere)", State.autoPillActive, nil, function(val)
+        State.autoPillActive = val
+        Config.autoPillActive = val
+        saveConfig()
+    end)
+
+    -- 3. CULTIVATION (INSTANT AUTO REALM M & AUTO BODY P) & BREAKTHROUGH
+    addSectionHeader("Cultivation (Instant Auto Realm & Body) & Breakthrough", 298)
+
+    local setRealmSwitch, setBodySwitch
+
+    _, setRealmSwitch = createToggleRow(page, 323, "Auto Realm (Instant Resume - Key M)", State.autoRealmActive, nil, function(val)
+        State.autoRealmActive = val
+        Config.autoRealmActive = val
+        State.lastRealmTrigger = 0
+        State.lastQiServerTick = 0
+        State.forceImmediateCultivate = val
+        if val and State.autoBodyActive then
+            State.autoBodyActive = false
+            Config.autoBodyActive = false
+            if setBodySwitch then setBodySwitch(false) end
+            pcall(function()
+                if CultivationEvents and CultivationEvents:FindFirstChild("StopPushup") then
+                    CU_LOG.sent("StopPushup"); CultivationEvents.StopPushup:FireServer()
+                end
+            end)
+        end
+        saveConfig()
+    end)
+
+    _, setBodySwitch = createToggleRow(page, 368, "Auto Body (Instant Resume - Key P)", State.autoBodyActive, nil, function(val)
+        State.autoBodyActive = val
+        Config.autoBodyActive = val
+        State.lastBodyTrigger = 0
+        State.lastBodyServerTick = 0
+        State.forceImmediateCultivate = val
+        if val and State.autoRealmActive then
+            State.autoRealmActive = false
+            Config.autoRealmActive = false
+            if setRealmSwitch then setRealmSwitch(false) end
+            pcall(function()
+                if CultivationEvents and CultivationEvents:FindFirstChild("StopMeditate") then
+                    CU_LOG.sent("StopMeditate"); CultivationEvents.StopMeditate:FireServer()
+                end
+            end)
+        end
+        saveConfig()
+    end)
+
+    createToggleRow(page, 413, "Auto Breakthrough (All Realms)", State.autoBreakthroughActive, nil, function(val)
+        State.autoBreakthroughActive = val
+        Config.autoBreakthroughActive = val
+        if not val and UI.RealmStatusLabel then
+            UI.RealmStatusLabel.Text = "Status: Auto Breakthrough Nonaktif"
+        end
+        saveConfig()
+    end)
+
+    local realmStatusLabel = Instance.new("TextLabel")
+    realmStatusLabel.Size = UDim2.new(0.96, 0, 0, 20)
+    realmStatusLabel.Position = UDim2.new(0, 4, 0, 454)
+    realmStatusLabel.BackgroundTransparency = 1
+    realmStatusLabel.Text = State.autoBreakthroughActive and "Status: Memantau Realm & Qi..." or "Status: Auto Breakthrough Nonaktif"
+    realmStatusLabel.TextColor3 = Color3.fromRGB(160, 210, 170)
+    realmStatusLabel.TextSize = 11
+    realmStatusLabel.Font = Enum.Font.GothamMedium
+    realmStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    realmStatusLabel.Parent = page
+    UI.RealmStatusLabel = realmStatusLabel
+
+    createToggleRow(page, 478, "Auto Click Qi Orb (Instant Network + UI)", State.autoQiOrbActive, nil, function(val)
+        State.autoQiOrbActive = val
+        Config.autoQiOrbActive = val
+        saveConfig()
+    end)
+
+    -- 4. AUTO KILL PLAYER
+    addSectionHeader("Auto Kill Player (Target Lock & Skills)", 528, Color3.fromRGB(220, 120, 130))
+
+    local playerDropContainer = Instance.new("Frame")
+    playerDropContainer.Size = UDim2.new(0.96, 0, 0, 38)
+    playerDropContainer.Position = UDim2.new(0, 0, 0, 553)
+    playerDropContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+    playerDropContainer.ZIndex = 3
+    playerDropContainer.Parent = page
+    addCorner(playerDropContainer, 6)
+
+    local playerDropLabel = Instance.new("TextLabel")
+    playerDropLabel.Size = UDim2.new(0.42, 0, 1, 0)
+    playerDropLabel.Position = UDim2.new(0, 10, 0, 0)
+    playerDropLabel.BackgroundTransparency = 1
+    playerDropLabel.Text = "Select Player"
+    playerDropLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    playerDropLabel.TextSize = 12
+    playerDropLabel.Font = Enum.Font.Gotham
+    playerDropLabel.TextXAlignment = Enum.TextXAlignment.Left
+    playerDropLabel.ZIndex = 3
+    playerDropLabel.Parent = playerDropContainer
+
+    local playerDropBtn = Instance.new("TextButton")
+    playerDropBtn.Size = UDim2.new(0.52, 0, 0.72, 0)
+    playerDropBtn.Position = UDim2.new(0.45, 0, 0.14, 0)
+    playerDropBtn.BackgroundColor3 = Color3.fromRGB(50, 40, 60)
+    playerDropBtn.Text = "Pilih Target ▾"
+    playerDropBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    playerDropBtn.TextSize = 10
+    playerDropBtn.Font = Enum.Font.GothamBold
+    playerDropBtn.ZIndex = 4
+    playerDropBtn.Parent = playerDropContainer
+    addCorner(playerDropBtn, 4)
+
+    local playerDropList = Instance.new("ScrollingFrame")
+    playerDropList.Size = UDim2.new(1, 0, 0, 120)
+    playerDropList.Position = UDim2.new(0, 0, 1, 4)
+    playerDropList.BackgroundColor3 = Color3.fromRGB(40, 32, 48)
+    playerDropList.Visible = false
+    playerDropList.ZIndex = 25
+    playerDropList.CanvasSize = UDim2.new(0, 0, 0, 120)
+    playerDropList.ScrollBarThickness = 4
+    playerDropList.Parent = playerDropBtn
+    addCorner(playerDropList, 4)
+
+    local function refreshPlayerDropdown()
+        for _, ch in pairs(playerDropList:GetChildren()) do
+            if ch:IsA("TextButton") then ch:Destroy() end
+        end
+        local idx = 0
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                idx = idx + 1
+                local pBtn = Instance.new("TextButton")
+                pBtn.Size = UDim2.new(1, -5, 0, 26)
+                pBtn.Position = UDim2.new(0, 0, 0, (idx - 1) * 28)
+                pBtn.BackgroundTransparency = 1
+                pBtn.Text = plr.DisplayName .. " (@" .. plr.Name .. ")"
+                pBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+                pBtn.TextSize = 10
+                pBtn.Font = Enum.Font.Gotham
+                pBtn.ZIndex = 26
+                pBtn.Parent = playerDropList
+
+                pBtn.Activated:Connect(function()
+                    State.selectedTargetPlayerName = plr.Name
+                    CU_LOG.add("KILL", "alvo", "escolhido: " .. plr.Name, 0)
+                    playerDropBtn.Text = plr.Name .. " ▾"
+                    playerDropList.Visible = false
+                end)
+            end
+        end
+        playerDropList.CanvasSize = UDim2.new(0, 0, 0, math.max(120, idx * 28))
+    end
+
+    refreshPlayerDropdown()
+    Players.PlayerAdded:Connect(refreshPlayerDropdown)
+    Players.PlayerRemoving:Connect(function(plr)
+        if plr.Name == State.selectedTargetPlayerName then
+            State.selectedTargetPlayerName = "None"
+            playerDropBtn.Text = "Pilih Target ▾"
+        end
+        refreshPlayerDropdown()
+    end)
+
+    herbDropBtn.Activated:Connect(function()
+        herbDropList.Visible = not herbDropList.Visible
+        pillDropList.Visible = false
+        playerDropList.Visible = false
+    end)
+    pillDropBtn.Activated:Connect(function()
+        pillDropList.Visible = not pillDropList.Visible
+        herbDropList.Visible = false
+        playerDropList.Visible = false
+    end)
+    playerDropBtn.Activated:Connect(function()
+        refreshPlayerDropdown()
+        playerDropList.Visible = not playerDropList.Visible
+        herbDropList.Visible = false
+        pillDropList.Visible = false
+    end)
+
+    createToggleRow(page, 598, "Auto Kill (Lock + Sword & Skills)", State.autoKillActive, Color3.fromRGB(210, 50, 70), function(val)
+        State.autoKillActive = val
+        Config.autoKillActive = val
+        saveConfig()
+    end)
+end
+
+-------------------------------------------------------------------------
+-- BUILD PAGE 2: LOCATION CATALOG
+-------------------------------------------------------------------------
+local instantTeleportToZone
+
+do
+    local locPage = UI.LocationPage
+
+    local function createZoneSection(headerTitle, posY, zonesList, initialZone, zIndexBase, onSelectZone, onTeleportClick)
+        local hdr = Instance.new("TextLabel")
+        hdr.Size = UDim2.new(1, 0, 0, 22)
+        hdr.Position = UDim2.new(0, 0, 0, posY)
+        hdr.BackgroundTransparency = 1
+        hdr.Text = headerTitle
+        hdr.TextColor3 = Color3.fromRGB(195, 190, 175)
+        hdr.TextSize = 14
+        hdr.Font = Enum.Font.GothamBold
+        hdr.TextXAlignment = Enum.TextXAlignment.Left
+        hdr.Parent = locPage
+
+        local dropContainer = Instance.new("Frame")
+        dropContainer.Size = UDim2.new(0.96, 0, 0, 40)
+        dropContainer.Position = UDim2.new(0, 0, 0, posY + 25)
+        dropContainer.BackgroundColor3 = Color3.fromRGB(36, 33, 24)
+        dropContainer.ZIndex = zIndexBase
+        dropContainer.Parent = locPage
+        addCorner(dropContainer, 6)
+        addStroke(dropContainer, Color3.fromRGB(85, 78, 52), 1)
+
+        local dropLabel = Instance.new("TextLabel")
+        dropLabel.Size = UDim2.new(0.42, 0, 1, 0)
+        dropLabel.Position = UDim2.new(0, 12, 0, 0)
+        dropLabel.BackgroundTransparency = 1
+        dropLabel.Text = "Select " .. headerTitle
+        dropLabel.TextColor3 = Color3.fromRGB(220, 215, 200)
+        dropLabel.TextSize = 12
+        dropLabel.Font = Enum.Font.GothamMedium
+        dropLabel.TextXAlignment = Enum.TextXAlignment.Left
+        dropLabel.ZIndex = zIndexBase
+        dropLabel.Parent = dropContainer
+
+        local dropBtn = Instance.new("TextButton")
+        dropBtn.Size = UDim2.new(0.52, 0, 0.72, 0)
+        dropBtn.Position = UDim2.new(0.45, 0, 0.14, 0)
+        dropBtn.BackgroundColor3 = Color3.fromRGB(52, 47, 34)
+        dropBtn.Text = initialZone .. " ▾"
+        dropBtn.TextColor3 = Color3.fromRGB(255, 245, 215)
+        dropBtn.TextSize = 11
+        dropBtn.Font = Enum.Font.GothamBold
+        dropBtn.ZIndex = zIndexBase + 1
+        dropBtn.Parent = dropContainer
+        addCorner(dropBtn, 4)
+
+        local dropList = Instance.new("ScrollingFrame")
+        dropList.Size = UDim2.new(1, 0, 0, 135)
+        dropList.Position = UDim2.new(0, 0, 1, 4)
+        dropList.BackgroundColor3 = Color3.fromRGB(42, 38, 28)
+        dropList.Visible = false
+        dropList.ZIndex = zIndexBase + 15
+        dropList.CanvasSize = UDim2.new(0, 0, 0, #zonesList * 28)
+        dropList.ScrollBarThickness = 4
+        dropList.Parent = dropBtn
+        addCorner(dropList, 4)
+
+        local tpBox = Instance.new("TextButton")
+        tpBox.Size = UDim2.new(0.96, 0, 0, 42)
+        tpBox.Position = UDim2.new(0, 0, 0, posY + 73)
+        tpBox.BackgroundColor3 = Color3.fromRGB(43, 39, 27)
+        tpBox.Text = ""
+        tpBox.AutoButtonColor = true
+        tpBox.ZIndex = 2
+        tpBox.Parent = locPage
+        addCorner(tpBox, 6)
+        addStroke(tpBox, Color3.fromRGB(98, 88, 56), 1.2)
+
+        local tpText = Instance.new("TextLabel")
+        tpText.Size = UDim2.new(1, -50, 1, 0)
+        tpText.Position = UDim2.new(0, 14, 0, 0)
+        tpText.BackgroundTransparency = 1
+        tpText.Text = "Teleport To " .. initialZone
+        tpText.TextColor3 = Color3.fromRGB(240, 238, 230)
+        tpText.TextSize = 13
+        tpText.Font = Enum.Font.GothamBold
+        tpText.TextXAlignment = Enum.TextXAlignment.Left
+        tpText.ZIndex = 3
+        tpText.Parent = tpBox
+
+        local tpIcon = Instance.new("TextLabel")
+        tpIcon.Size = UDim2.new(0, 32, 0, 32)
+        tpIcon.Position = UDim2.new(1, -38, 0.5, -16)
+        tpIcon.BackgroundTransparency = 1
+        tpIcon.Text = "✵"
+        tpIcon.TextColor3 = Color3.fromRGB(245, 240, 225)
+        tpIcon.TextSize = 19
+        tpIcon.Font = Enum.Font.GothamBold
+        tpIcon.ZIndex = 3
+        tpIcon.Parent = tpBox
+
+        for i, zName in ipairs(zonesList) do
+            local zBtn = Instance.new("TextButton")
+            zBtn.Size = UDim2.new(1, -5, 0, 26)
+            zBtn.Position = UDim2.new(0, 0, 0, (i - 1) * 28)
+            zBtn.BackgroundTransparency = 1
+            zBtn.Text = zName
+            zBtn.TextColor3 = Color3.fromRGB(235, 230, 215)
+            zBtn.TextSize = 11
+            zBtn.Font = Enum.Font.Gotham
+            zBtn.ZIndex = zIndexBase + 16
+            zBtn.Parent = dropList
+
+            zBtn.Activated:Connect(function()
+                dropBtn.Text = zName .. " ▾"
+                tpText.Text = "Teleport To " .. zName
+                dropList.Visible = false
+                onSelectZone(zName)
+            end)
+        end
+
+        dropBtn.Activated:Connect(function()
+            dropList.Visible = not dropList.Visible
+        end)
+
+        tpBox.Activated:Connect(onTeleportClick)
+    end
+
+    createZoneSection("Qi Zone", 5, Constants.QI_ZONES_LIST, State.selectedQiZone, 8, function(zName)
+        State.selectedQiZone = zName
+        Config.selectedQiZone = zName
+        saveConfig()
+    end, function()
+        if instantTeleportToZone then
+            task.spawn(function() instantTeleportToZone(State.selectedQiZone) end)
+        end
+    end)
+
+    createZoneSection("Body Zone", 140, Constants.BODY_ZONES_LIST, State.selectedBodyZone, 5, function(zName)
+        State.selectedBodyZone = zName
+        Config.selectedBodyZone = zName
+        saveConfig()
+    end, function()
+        if instantTeleportToZone then
+            task.spawn(function() instantTeleportToZone(State.selectedBodyZone) end)
+        end
+    end)
+
+    local zoneStatusLabel = Instance.new("TextLabel")
+    zoneStatusLabel.Size = UDim2.new(0.96, 0, 0, 32)
+    zoneStatusLabel.Position = UDim2.new(0, 4, 0, 265)
+    zoneStatusLabel.BackgroundTransparency = 1
+    zoneStatusLabel.TextWrapped = true
+    zoneStatusLabel.Text = "Status Location: Siap Teleport kapan saja (Saat kultivasi/terbang otomatis di-handle)."
+    zoneStatusLabel.TextColor3 = Color3.fromRGB(180, 210, 160)
+    zoneStatusLabel.TextSize = 11
+    zoneStatusLabel.Font = Enum.Font.GothamMedium
+    zoneStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    zoneStatusLabel.Parent = locPage
+    UI.ZoneStatusLabel = zoneStatusLabel
+end
+
+-------------------------------------------------------------------------
+-- BUILD PAGE 3: SETTING CATALOG
+-------------------------------------------------------------------------
+do
+    local setPage = UI.SettingPage
+
+    local settingTitle = Instance.new("TextLabel")
+    settingTitle.Size = UDim2.new(1, 0, 0, 20)
+    settingTitle.BackgroundTransparency = 1
+    settingTitle.Text = "UI Keybind & Auto-Save Config"
+    settingTitle.TextColor3 = Color3.fromRGB(180, 180, 180)
+    settingTitle.TextSize = 13
+    settingTitle.Font = Enum.Font.GothamBold
+    settingTitle.TextXAlignment = Enum.TextXAlignment.Left
+    settingTitle.Parent = setPage
+
+    local keybindContainer = Instance.new("Frame")
+    keybindContainer.Size = UDim2.new(0.96, 0, 0, 38)
+    keybindContainer.Position = UDim2.new(0, 0, 0, 25)
+    keybindContainer.BackgroundColor3 = Color3.fromRGB(32, 26, 38)
+    keybindContainer.Parent = setPage
+    addCorner(keybindContainer, 6)
+
+    local keyLabel = Instance.new("TextLabel")
+    keyLabel.Size = UDim2.new(0.6, 0, 1, 0)
+    keyLabel.Position = UDim2.new(0, 10, 0, 0)
+    keyLabel.BackgroundTransparency = 1
+    keyLabel.Text = "PC Toggle Key"
+    keyLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    keyLabel.TextSize = 12
+    keyLabel.Font = Enum.Font.Gotham
+    keyLabel.TextXAlignment = Enum.TextXAlignment.Left
+    keyLabel.Parent = keybindContainer
+
+    local keyInputBox = Instance.new("TextBox")
+    keyInputBox.Size = UDim2.new(0, 95, 0, 24)
+    keyInputBox.Position = UDim2.new(1, -105, 0.5, -12)
+    keyInputBox.BackgroundColor3 = Color3.fromRGB(45, 36, 54)
+    keyInputBox.Text = State.toggleKey.Name
+    keyInputBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    keyInputBox.TextSize = 11
+    keyInputBox.Font = Enum.Font.GothamBold
+    keyInputBox.Parent = keybindContainer
+    addCorner(keyInputBox, 4)
+
+    keyInputBox.Focused:Connect(function()
+        keyInputBox.Text = "..."
+    end)
+
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if keyInputBox:IsFocused() and input.UserInputType == Enum.UserInputType.Keyboard then
+            State.toggleKey = input.KeyCode
+            Config.toggleKeyName = State.toggleKey.Name
+            keyInputBox.Text = State.toggleKey.Name
+            keyInputBox:ReleaseFocus()
+            saveConfig()
+        elseif not gameProcessed and input.KeyCode == State.toggleKey then
+            State.uiVisible = not State.uiVisible
+            UI.MainFrame.Visible = State.uiVisible
+        end
+    end)
+
+    local resetConfigBtn = Instance.new("TextButton")
+    resetConfigBtn.Size = UDim2.new(0.96, 0, 0, 36)
+    resetConfigBtn.Position = UDim2.new(0, 0, 0, 72)
+    resetConfigBtn.BackgroundColor3 = Color3.fromRGB(140, 45, 55)
+    resetConfigBtn.Text = "Reset Saved Config to Default"
+    resetConfigBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    resetConfigBtn.TextSize = 12
+    resetConfigBtn.Font = Enum.Font.GothamBold
+    resetConfigBtn.Parent = setPage
+    addCorner(resetConfigBtn, 6)
+
+    resetConfigBtn.Activated:Connect(function()
+        pcall(function()
+            if delfile and isfile and isfile(CONFIG_FILE_NAME) then
+                delfile(CONFIG_FILE_NAME)
+            end
+        end)
+        resetConfigBtn.Text = "Config Berhasil Direset!"
+        task.wait(1.5)
+        resetConfigBtn.Text = "Reset Saved Config to Default"
+    end)
+
+    local infoBox = Instance.new("TextLabel")
+    infoBox.Size = UDim2.new(0.96, 0, 0, 140)
+    infoBox.Position = UDim2.new(0, 0, 0, 118)
+    infoBox.BackgroundTransparency = 1
+    infoBox.TextWrapped = true
+    infoBox.Text = "• Auto Create Pills: Zero-Lag (Tanpa pindah Cauldron berulang) + Deteksi 3 Kolom Slot Presisi + Instant Claim.\n• Auto Realm & Body: Deteksi Animasi & Event (<0.2s langsung aktif saat berhenti).\n• Teleportasi: Otomatis melepas kunci terbang/kultivasi sebelum pindah & lanjut kultivasi di tempat baru."
+    infoBox.TextColor3 = Color3.fromRGB(160, 160, 160)
+    infoBox.TextSize = 11
+    infoBox.Font = Enum.Font.Gotham
+    infoBox.TextXAlignment = Enum.TextXAlignment.Left
+    infoBox.TextYAlignment = Enum.TextYAlignment.Top
+    infoBox.Parent = setPage
+end
+
+
+-------------------------------------------------------------------------
+-- CU1: ABA LOGS (SALVAR TXT / COPIAR / TXT AUTOMATICO)
+-------------------------------------------------------------------------
+do
+    local page = UI.LogsPage
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 20)
+    title.BackgroundTransparency = 1
+    title.Text = "Log de diagnostico (" .. CU_LOG.version .. ")"
+    title.TextColor3 = Color3.fromRGB(180, 180, 180)
+    title.TextSize = 13
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = page
+
+    local status = Instance.new("TextLabel")
+    status.Size = UDim2.new(0.96, 0, 0, 34)
+    status.Position = UDim2.new(0, 0, 0, 152)
+    status.BackgroundTransparency = 1
+    status.TextWrapped = true
+    status.Text = "Depois de testar, salve o TXT e mande para analise."
+    status.TextColor3 = Color3.fromRGB(200, 200, 120)
+    status.TextSize = 11
+    status.Font = Enum.Font.Gotham
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.TextYAlignment = Enum.TextYAlignment.Top
+    status.Parent = page
+
+    local function makeButton(text, posY, color, onClick)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0.96, 0, 0, 36)
+        b.Position = UDim2.new(0, 0, 0, posY)
+        b.BackgroundColor3 = color
+        b.Text = text
+        b.TextColor3 = Color3.fromRGB(255, 255, 255)
+        b.TextSize = 12
+        b.Font = Enum.Font.GothamBold
+        b.Parent = page
+        addCorner(b, 6)
+        b.Activated:Connect(function() CU_LOG.try("Botao " .. text, onClick) end)
+        return b
+    end
+
+    makeButton("Salvar TXT do log", 25, Color3.fromRGB(45, 110, 70), function()
+        local ok, info = CU_LOG.save()
+        status.Text = ok and ("TXT salvo na pasta do executor: " .. tostring(info)) or ("Nao salvou: " .. tostring(info))
+    end)
+    makeButton("Copiar log (resumo + ultimos eventos)", 67, Color3.fromRGB(45, 70, 120), function()
+        local ok, info = CU_LOG.copy()
+        status.Text = ok and ("Copiado: " .. tostring(info) .. " caracteres") or ("Nao copiou: " .. tostring(info))
+    end)
+    createToggleRow(page, 109, "TXT automatico a cada 5 min", CU_LOG.autoSave, nil, function(val)
+        CU_LOG.autoSave = val
+    end)
+
+    local summary = Instance.new("TextLabel")
+    summary.Size = UDim2.new(0.96, 0, 0, 130)
+    summary.Position = UDim2.new(0, 0, 0, 190)
+    summary.BackgroundTransparency = 1
+    summary.TextWrapped = true
+    summary.Text = ""
+    summary.TextColor3 = Color3.fromRGB(160, 160, 160)
+    summary.TextSize = 11
+    summary.Font = Enum.Font.Gotham
+    summary.TextXAlignment = Enum.TextXAlignment.Left
+    summary.TextYAlignment = Enum.TextYAlignment.Top
+    summary.Parent = page
+
+    CU_LOG.spawnLoop("Aba Logs", function()
+        while UI.ScreenGui and UI.ScreenGui.Parent do
+            if page.Visible then
+                local c = CU_LOG.counts
+                local function n(k) return c[k] or 0 end
+                summary.Text = string.format("Erros: %d tipo(s)\nCliques na tela: getconnections %d, firesignal %d, mouse VIM %d, sem metodo %d\nTeclas simuladas com erro: %d\nEventos do servidor recebidos: %d tipos\nFuncoes ligadas: %s\nEventos no log: %d",
+                    #CU_LOG.errorOrder, n("Cliques na tela: getconnections"), n("Cliques na tela: firesignal"),
+                    n("Cliques na tela: mouse VIM"), n("Cliques na tela: nenhum metodo (botao invisivel, menu aberto ou caixa de texto)"),
+                    n("Teclas simuladas: ERRO"), #CU_LOG.remoteOrder, CU_LOG.activeList(), #CU_LOG.entries)
+            end
+            task.wait(2)
+        end
+    end)
+end
+
+-------------------------------------------------------------------------
+-- TELEPORTASI PRESISI (BISA SAAT KULTIVASI, LATIHAN TUBUH, ATAU TERBANG)
+-------------------------------------------------------------------------
+do
+    local function refineFloorInsideZone(basePos, zoneName)
+        local normTarget = normalizeName(zoneName)
+
+        -- 1. Cek part zona spesifik di CultivationZones / BodyCultivationZones / MapAnchors jika sudah ter-stream
+        for _, folderName in ipairs({"CultivationZones", "BodyCultivationZones", "MapAnchors"}) do
+            local folder = Workspace:FindFirstChild(folderName)
+            if folder then
+                for _, ch in pairs(folder:GetChildren()) do
+                    if normalizeName(ch.Name):find(normTarget, 1, true) and ch:IsA("BasePart") then
+                        basePos = ch.Position
+                        break
+                    end
+                end
+            end
+        end
+
+        -- 2. Cek halaman/yard di Landmarks jika sudah ter-stream
+        local mapModel = Workspace:FindFirstChild("Map_sacred-mountain")
+        local landmarks = mapModel and mapModel:FindFirstChild("Landmarks")
+        if landmarks then
+            local lmFolder = landmarks:FindFirstChild(zoneName)
+            if lmFolder then
+                for _, d in pairs(lmFolder:GetDescendants()) do
+                    if d:IsA("BasePart") then
+                        local pLow = d.Name:lower()
+                        local mLow = d.Parent and d.Parent.Name:lower() or ""
+                        if pLow:find("zone") or pLow:find("yard") or pLow:find("ring") or pLow:find("arena") or pLow:find("floor")
+                            or mLow:find("yard") or mLow:find("ring") or mLow:find("crucible") or mLow:find("colosseum") or mLow:find("forge") then
+                            basePos = d.Position
+                            break
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 3. Raycast ke permukaan lantai agar tidak melayang atau menembus tanah
+        local rayParams = RaycastParams.new()
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
+
+        local rayResult = Workspace:Raycast(Vector3.new(basePos.X, basePos.Y + 25, basePos.Z), Vector3.new(0, -150, 0), rayParams)
+        if rayResult then
+            return rayResult.Position + Vector3.new(0, 3.0, 0)
+        end
+        return basePos + Vector3.new(0, 3.0, 0)
+    end
+
+    -- Membersihkan semua pengunci gerak (kultivasi, pushup, tween autofarm, sword flight) sebelum teleport
+    local function releaseAllMovementLocks(char, root, hum)
+        -- 1. Hentikan Tween Autofarm Herb yang sedang berjalan agar tidak menarik balik karakter
+        if State.activeFarmTween then
+            pcall(function() State.activeFarmTween:Cancel() end)
+            State.activeFarmTween = nil
+        end
+        if State.activeFarmVelocity then
+            pcall(function() State.activeFarmVelocity:Destroy() end)
+            State.activeFarmVelocity = nil
+        end
+
+        -- 2. Hapus semua BodyMover / Constraint terbang pada karakter
+        if char then
+            for _, desc in pairs(char:GetDescendants()) do
+                if desc:IsA("BodyMover") or desc:IsA("LinearVelocity") or desc:IsA("AlignPosition") or desc:IsA("AlignOrientation") then
+                    pcall(function() desc:Destroy() end)
+                end
+            end
+        end
+
+        -- 3. Lepaskan kunci MovementGuardRules server/client dari Meditasi, Pushup, atau SwordFlight
+        pcall(function()
+            local stopMedBind = ReplicatedStorage:FindFirstChild("LocalStopMeditate")
+            if stopMedBind and stopMedBind:IsA("BindableEvent") then stopMedBind:Fire() end
+
+            local stopPushBind = ReplicatedStorage:FindFirstChild("LocalStopPushup")
+            if stopPushBind and stopPushBind:IsA("BindableEvent") then stopPushBind:Fire() end
+
+            if CultivationEvents then
+                if CultivationEvents:FindFirstChild("StopMeditate") then
+                    CU_LOG.sent("StopMeditate"); CultivationEvents.StopMeditate:FireServer()
+                end
+                if CultivationEvents:FindFirstChild("StopPushup") then
+                    CU_LOG.sent("StopPushup"); CultivationEvents.StopPushup:FireServer()
+                end
+                if CultivationEvents:FindFirstChild("SwordFlight") then
+                    CU_LOG.sent("SwordFlight"); CultivationEvents.SwordFlight:FireServer(false)
+                end
+            end
+        end)
+
+        -- 4. Reset state Humanoid & RootPart
+        if root then
+            root.Anchored = false
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end
+        if hum then
+            hum.Sit = false
+            hum.PlatformStand = false
+            pcall(function()
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                hum:ChangeState(Enum.HumanoidStateType.Running)
+            end)
+            local animator = hum:FindFirstChildWhichIsA("Animator")
+            if animator then
+                for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+                    local anim = track.Animation
+                    local animateFolder = char:FindFirstChild("Animate")
+                    if not (anim and animateFolder and anim:IsDescendantOf(animateFolder)) then
+                        pcall(function() track:Stop(0) end)
+                    end
+                end
+            end
+        end
+    end
+
+    instantTeleportToZone = function(zoneName)
+        if State.isTeleportingZone then return end
+        State.isTeleportingZone = true
+
+        local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+        local root = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildWhichIsA("Humanoid")
+
+        if not root then
+            UI.ZoneStatusLabel.Text = "Status: Karakter belum siap!"
+            State.isTeleportingZone = false
+            return
+        end
+
+        local targetCoord = Constants.EXACT_ZONE_COORDS[zoneName]
+        if not targetCoord then
+            UI.ZoneStatusLabel.Text = "Koordinat zona tidak ditemukan!"
+            State.isTeleportingZone = false
+            return
+        end
+
+        UI.ZoneStatusLabel.Text = "Melepas kunci gerak/terbang & menyiapkan Teleport ke " .. zoneName .. "..."
+        local cuTp = os.clock()
+        CU_LOG.add("TELEPORTE", zoneName, string.format("inicio em (%d, %d, %d)", math.round(root.Position.X), math.round(root.Position.Y), math.round(root.Position.Z)), 0)
+
+        -- Langkah 1: Lepaskan semua pengunci kultivasi / pushup / terbang terlebih dahulu
+        releaseAllMovementLocks(char, root, hum)
+        task.wait(0.16)
+
+        -- Langkah 2: Minta server men-stream area tujuan
+        pcall(function()
+            LocalPlayer:RequestStreamAroundAsync(targetCoord, 2.5)
+        end)
+
+        UI.ZoneStatusLabel.Text = "Teleportasi Instan ke " .. zoneName .. "..."
+
+        -- Langkah 3: Pindahkan karakter secara instan ke koordinat zona
+        for _ = 1, 8 do
+            root.Anchored = false
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            char:PivotTo(CFrame.new(targetCoord + Vector3.new(0, 4, 0)))
+            root.CFrame = CFrame.new(targetCoord + Vector3.new(0, 4, 0))
+            RunService.Heartbeat:Wait()
+        end
+
+        task.wait(0.18)
+
+        -- Langkah 4: Presisikan tepat di lantai tengah buff zone setelah objek sekitar ter-render
+        local finalBuffPos = refineFloorInsideZone(targetCoord, zoneName)
+        for _ = 1, 10 do
+            root.Anchored = false
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            char:PivotTo(CFrame.new(finalBuffPos))
+            root.CFrame = CFrame.new(finalBuffPos)
+            RunService.Heartbeat:Wait()
+        end
+
+        -- Langkah 5: Aktifkan kembali Auto Realm atau Auto Body secara instan di zona baru!
+        State.lastQiServerTick = 0
+        State.lastBodyServerTick = 0
+        State.lastRealmTrigger = 0
+        State.lastBodyTrigger = 0
+        State.forceImmediateCultivate = true
+
+        UI.ZoneStatusLabel.Text = string.format("Berhasil Teleport ke %s! (%d, %d, %d)", zoneName, math.round(finalBuffPos.X), math.round(finalBuffPos.Y), math.round(finalBuffPos.Z))
+        CU_LOG.count("Teleporte: zonas")
+        CU_LOG.add("TELEPORTE", zoneName, string.format("chegou em %.1fs; alvo (%d, %d, %d), posicao final (%d, %d, %d)", os.clock() - cuTp, math.round(finalBuffPos.X), math.round(finalBuffPos.Y), math.round(finalBuffPos.Z), math.round(root.Position.X), math.round(root.Position.Y), math.round(root.Position.Z)), 0)
+        State.isTeleportingZone = false
+    end
+end
+
+-------------------------------------------------------------------------
+-- AUTO REALM (StartMeditate / M) & AUTO BODY (StartPushup / P) - INSTANT RESUME
+-------------------------------------------------------------------------
+do
+    -- 1. Dengarkan detak server dan event berhenti untuk responsivitas instan (<0.2s)
+    if CultivationEvents then
+        local updateClientRem = CultivationEvents:FindFirstChild("UpdateClient")
+        if updateClientRem and updateClientRem:IsA("RemoteEvent") then
+            updateClientRem.OnClientEvent:Connect(function()
+                State.lastQiServerTick = tick()
+            end)
+        end
+
+        local updateBodyRem = CultivationEvents:FindFirstChild("UpdateBodyClient")
+        if updateBodyRem and updateBodyRem:IsA("RemoteEvent") then
+            updateBodyRem.OnClientEvent:Connect(function()
+                State.lastBodyServerTick = tick()
+            end)
+        end
+
+        -- Jika server mengirim sinyal berhenti/selesai breakthrough, langsung picu resume instan!
+        for _, evName in ipairs({
+            "StopMeditate", "StopPushup", "BreakthroughEffect",
+            "BodyBreakthroughCutsceneDone", "CultivateResumed", "BreakthroughMinigameResult"
+        }) do
+            local ev = CultivationEvents:FindFirstChild(evName)
+            if ev and ev:IsA("RemoteEvent") then
+                ev.OnClientEvent:Connect(function()
+                    State.lastQiServerTick = 0
+                    State.lastBodyServerTick = 0
+                    State.lastRealmTrigger = 0
+                    State.lastBodyTrigger = 0
+                    State.forceImmediateCultivate = true
+                end)
+            end
+        end
+    end
+
+    for _, bindName in ipairs({"LocalStopMeditate", "LocalStopPushup", "RealmBreakthroughNotify"}) do
+        local bEv = ReplicatedStorage:FindFirstChild(bindName)
+        if bEv and bEv:IsA("BindableEvent") then
+            bEv.Event:Connect(function()
+                State.lastQiServerTick = 0
+                State.lastBodyServerTick = 0
+                State.lastRealmTrigger = 0
+                State.lastBodyTrigger = 0
+                State.forceImmediateCultivate = true
+            end)
+        end
+    end
+
+    -- 2. Fungsi pengecek apakah karakter sedang memainkan animasi Meditasi / Pushup (Non-Idle)
+    local function hasActiveCultivationAnimation(char)
+        if not char then return false end
+        local hum = char:FindFirstChildWhichIsA("Humanoid")
+        local animator = hum and hum:FindFirstChildWhichIsA("Animator")
+        if not animator then return false end
+
+        local animateFolder = char:FindFirstChild("Animate")
+        for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+            if track.IsPlaying and track.WeightCurrent > 0.05 then
+                local anim = track.Animation
+                local isDefault = false
+                if anim and animateFolder and anim:IsDescendantOf(animateFolder) then
+                    isDefault = true
+                end
+                local tName = (track.Name or ""):lower()
+                if tName == "animation1" or tName == "animation2" or tName == "idle" or tName == "walk"
+                    or tName == "run" or tName == "jump" or tName == "fall" or tName == "toolnone" then
+                    isDefault = true
+                end
+                if not isDefault then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    -- 3. Loop Responsif (Mengecek setiap 0.15 detik, langsung aktif begitu karakter berhenti)
+    CU_LOG.spawnLoop("Realm/Body", function()
+        while true do
+            if (State.autoRealmActive or State.autoBodyActive) and not isUserTypingOrInMenu() and not State.isTeleportingZone and not State.autoFarmActive and not State.autoKillActive then
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                local isMoving = hum and (hum.MoveDirection.Magnitude > 0.05 or (root and root.AssemblyLinearVelocity.Magnitude > 4))
+
+                if isMoving then
+                    CU_LOG.count("Realm/Body: personagem andando (reinicia ao parar)")
+                    State.lastQiServerTick = 0
+                    State.lastBodyServerTick = 0
+                    State.lastRealmTrigger = 0
+                    State.lastBodyTrigger = 0
+                    State.forceImmediateCultivate = true
+                else
+                    -- Jangan tekan M/P hanya jika sedang di tengah minigame Breakthrough Trial
+                    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+                    local inTrial = false
+                    if playerGui then
+                        for _, obj in pairs(playerGui:GetDescendants()) do
+                            if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                                local t = trimText(obj.Text)
+                                if t:find("breakthrough trial", 1, true) or t:find("ring turns gold", 1, true) then
+                                    inTrial = true
+                                    break
+                                end
+                            end
+                        end
+                    end
+
+                    if inTrial then CU_LOG.count("Realm/Body: minijogo de breakthrough aberto (espera)") end
+                    if not inTrial then
+                        local now = tick()
+                        local animPlaying = hasActiveCultivationAnimation(char)
+                        CU_LOG.add("STATUS", "Realm/Body", string.format("animacao de cultivo=%s | UpdateClient ha %s | UpdateBodyClient ha %s",
+                            tostring(animPlaying), CU_LOG.ago(State.lastQiServerTick, now), CU_LOG.ago(State.lastBodyServerTick, now)), 30, "realm-status")
+
+                        if State.autoRealmActive then
+                            local serverActive = (now - State.lastQiServerTick) < 1.35
+                            local isCultivating = animPlaying and serverActive
+                            local cooldown = State.forceImmediateCultivate and 0.25 or 1.35
+
+                            if (not isCultivating or State.forceImmediateCultivate) and (now - State.lastRealmTrigger) >= cooldown then
+                                State.lastRealmTrigger = now
+                                State.forceImmediateCultivate = false
+                                pcall(function()
+                                    if CultivationEvents and CultivationEvents:FindFirstChild("StartMeditate") then
+                                        CU_LOG.sent("StartMeditate"); CultivationEvents.StartMeditate:FireServer()
+                                    end
+                                end)
+                                if not animPlaying then
+                                    triggerKeyPress("M")
+                                end
+                            end
+                        elseif State.autoBodyActive then
+                            local serverActive = (now - State.lastBodyServerTick) < 1.35
+                            local isTraining = animPlaying and serverActive
+                            local cooldown = State.forceImmediateCultivate and 0.25 or 1.35
+
+                            if (not isTraining or State.forceImmediateCultivate) and (now - State.lastBodyTrigger) >= cooldown then
+                                State.lastBodyTrigger = now
+                                State.forceImmediateCultivate = false
+                                pcall(function()
+                                    if CultivationEvents and CultivationEvents:FindFirstChild("StartPushup") then
+                                        CU_LOG.sent("StartPushup"); CultivationEvents.StartPushup:FireServer()
+                                    end
+                                end)
+                                if not animPlaying then
+                                    triggerKeyPress("P")
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(0.15)
+        end
+    end)
+end
+
+-------------------------------------------------------------------------
+-- 1. FARMING LOGIC (HERBS - PRIORITY 1000YR > 100YR > 10YR > 1YR)
+-------------------------------------------------------------------------
+CU_LOG.spawnLoop("Ervas", function()
+    local function cleanBlacklist()
+        local now = tick()
+        for obj, timeAdded in pairs(State.harvestedBlacklist) do
+            if now - timeAdded > State.blacklistDuration then
+                State.harvestedBlacklist[obj] = nil
+            end
+        end
+    end
+
+    local function getValidPrompt(object)
+        local prompt = object:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if prompt and prompt.Enabled and prompt.Parent then return prompt end
+        if object.Parent then
+            local parentPrompt = object.Parent:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if parentPrompt and parentPrompt.Enabled then return parentPrompt end
+        end
+        return nil
+    end
+
+    local function getHerbLevelScore(obj, prompt)
+        local score = 1
+        local texts = {obj.Name}
+        if obj.Parent and obj.Parent ~= Workspace then table.insert(texts, obj.Parent.Name) end
+        if prompt then
+            table.insert(texts, prompt.ObjectText or "")
+            table.insert(texts, prompt.ActionText or "")
+        end
+        pcall(function()
+            for k, v in pairs(obj:GetAttributes()) do
+                table.insert(texts, tostring(k) .. " " .. tostring(v))
+            end
+        end)
+        for _, desc in pairs(obj:GetDescendants()) do
+            if desc:IsA("TextLabel") then table.insert(texts, desc.Text) end
+        end
+        local combined = table.concat(texts, " "):lower()
+        for _, yrData in ipairs(Constants.HERB_YEAR_PRIORITY) do
+            if combined:find(yrData.pattern, 1, true) then
+                score = math.max(score, yrData.score)
+                break
+            end
+        end
+        return score
+    end
+
+    local function getBestAndClosestHerb(root)
+        cleanBlacklist()
+        local bestHerb = nil
+        local highestScore = -1
+        local shortestDistance = math.huge
+
+        local searchRoot = Workspace:FindFirstChild("HerbSpots") or Workspace
+        for _, obj in pairs(searchRoot:GetDescendants()) do
+            if not State.harvestedBlacklist[obj] and (obj:IsA("BasePart") or obj:IsA("Model")) then
+                if obj.Name:lower():find(State.selectedHerb:lower()) then
+                    local partToTarget = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")) or obj
+                    if partToTarget then
+                        local prompt = getValidPrompt(obj)
+                        if prompt then
+                            local levelScore = getHerbLevelScore(obj, prompt)
+                            local distance = (root.Position - partToTarget.Position).Magnitude
+                            if (levelScore > highestScore) or (levelScore == highestScore and distance < shortestDistance) then
+                                highestScore = levelScore
+                                shortestDistance = distance
+                                bestHerb = {Object = obj, Part = partToTarget, Prompt = prompt}
+                            end
+                        else
+                            State.harvestedBlacklist[obj] = tick()
+                        end
+                    end
+                end
+            end
+        end
+        return bestHerb
+    end
+
+    local function flyToTarget(root, targetPart)
+        local distance = (root.Position - targetPart.Position).Magnitude
+        local duration = distance / State.flySpeed
+        local tween = TweenService:Create(
+            root,
+            TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+            {CFrame = targetPart.CFrame * CFrame.new(0, 3, 0)}
+        )
+        State.activeFarmTween = tween
+
+        local bodyVelocity = Instance.new("BodyVelocity")
+        bodyVelocity.Velocity = Vector3.new(0, 0, 0)
+        bodyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+        bodyVelocity.Parent = root
+        State.activeFarmVelocity = bodyVelocity
+
+        tween:Play()
+        local completed = false
+        local conn = tween.Completed:Connect(function() completed = true end)
+        while not completed and State.autoFarmActive and not State.isTeleportingZone do
+            task.wait(0.08)
+        end
+        if not State.autoFarmActive or State.isTeleportingZone then
+            pcall(function() tween:Cancel() end)
+        end
+        if conn then conn:Disconnect() end
+        pcall(function() bodyVelocity:Destroy() end)
+        State.activeFarmTween = nil
+        State.activeFarmVelocity = nil
+    end
+
+    while true do
+        if State.autoFarmActive and not State.isTeleportingZone then
+            local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if root then
+                local targetData = getBestAndClosestHerb(root)
+                CU_LOG.herb(targetData, root, State.selectedHerb)
+                if targetData and State.autoFarmActive and not State.isTeleportingZone then
+                    if targetData.Prompt and targetData.Prompt.Enabled then
+                        local cuFly = os.clock()
+                        flyToTarget(root, targetData.Part)
+                        CU_LOG.count("Ervas: voos")
+                        CU_LOG.add("ERVA", "voo", string.format("%.1fs ate %s; ficou a %.0f studs", os.clock() - cuFly, tostring(targetData.Object.Name), (root.Position - targetData.Part.Position).Magnitude), 2)
+                        if State.autoFarmActive and not State.isTeleportingZone and targetData.Prompt and targetData.Prompt.Enabled then
+                            if fireproximityprompt then
+                                CU_LOG.count("Ervas: coleta via fireproximityprompt")
+                                fireproximityprompt(targetData.Prompt)
+                            else
+                                CU_LOG.count("Ervas: coleta via InputHold (sem fireproximityprompt)")
+                                targetData.Prompt:InputHoldBegin()
+                                task.wait(targetData.Prompt.HoldDuration or 0.5)
+                                targetData.Prompt:InputHoldEnd()
+                            end
+                            State.harvestedBlacklist[targetData.Object] = tick()
+                            task.wait(State.waitAtHerb)
+                        end
+                    else
+                        State.harvestedBlacklist[targetData.Object] = tick()
+                    end
+                else
+                    task.wait(1.0)
+                end
+            else
+                task.wait(1.0)
+            end
+        else
+            task.wait(0.4)
+        end
+    end
+end)
+
+-------------------------------------------------------------------------
+-- 2. AUTOCREATE PILLS (ZERO-LAG ANYWHERE + 3-COLUMN SLOT + INSTANT CLAIM)
+-------------------------------------------------------------------------
+do
+    -- Instant Claim Listener saat server mengirim sinyal selesai masak
+    if CultivationEvents then
+        local brewCompleteRem = CultivationEvents:FindFirstChild("CauldronBrewComplete")
+        if brewCompleteRem and brewCompleteRem:IsA("RemoteEvent") then
+            brewCompleteRem.OnClientEvent:Connect(function()
+                if State.autoPillActive then
+                    pcall(function() CU_LOG.sent("CauldronClaim"); CultivationEvents.CauldronClaim:FireServer() end)
+                end
+            end)
+        end
+
+        local stokeResRem = CultivationEvents:FindFirstChild("CauldronStokeResult")
+        if stokeResRem and stokeResRem:IsA("RemoteEvent") then
+            stokeResRem.OnClientEvent:Connect(function()
+                if State.autoPillActive then
+                    State.isBrewingWaitClaim = true
+                    task.spawn(function()
+                        for _ = 1, 15 do
+                            if not State.autoPillActive then break end
+                            pcall(function() CU_LOG.sent("CauldronClaim"); CultivationEvents.CauldronClaim:FireServer() end)
+                            task.wait(0.25)
+                        end
+                    end)
+                end
+            end)
+        end
+    end
+
+    CU_LOG.spawnLoop("Pilulas", function()
+        local lastCauldronOpenAttempt = 0
+
+        local function findVisibleTextElement(targetStr, exactMatch)
+            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+            if not playerGui then return nil end
+            local targetLower = trimText(targetStr)
+
+            for _, obj in pairs(playerGui:GetDescendants()) do
+                if obj ~= UI.ScreenGui and not obj:IsDescendantOf(UI.ScreenGui) then
+                    if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                        local textLower = trimText(obj.Text)
+                        if (exactMatch and textLower == targetLower) or (not exactMatch and textLower:find(targetLower, 1, true)) then
+                            return obj
+                        end
+                    end
+                end
+            end
+            return nil
+        end
+
+        -- Membuka Cauldron dari mana saja TANPA memindahkan Cauldron setiap frame (Bebas Patah-Patah / Lag!)
+        local function openCauldronZeroLag()
+            local isOpen = findVisibleTextElement("alchemy cauldron", false)
+                or findVisibleTextElement("choose a herb", false)
+                or findVisibleTextElement("stoke", true)
+
+            if isOpen then return true end
+            if tick() - lastCauldronOpenAttempt < 2.2 then return false end
+            lastCauldronOpenAttempt = tick()
+
+            local cauldronMesh = Workspace:FindFirstChild("CauldronForBrewing")
+            if not cauldronMesh then CU_LOG.count("Pilulas: CauldronForBrewing nao encontrado no Workspace") end
+            if cauldronMesh and cauldronMesh:IsA("BasePart") then
+                if not State.cauldronOrigCFrame then
+                    State.cauldronOrigCFrame = cauldronMesh.CFrame
+                end
+
+                local prompt = cauldronMesh:FindFirstChildWhichIsA("ProximityPrompt", true)
+                local char = LocalPlayer.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+
+                if prompt and root then
+                    pcall(function()
+                        prompt.MaxActivationDistance = 100000
+                        prompt.RequiresLineOfSight = false
+                        prompt.HoldDuration = 0
+
+                        -- Pindahkan ke bawah tanah (-12 studs) hanya selama 0.08 detik untuk memicu prompt tanpa menabrak karakter!
+                        cauldronMesh.CanCollide = false
+                        cauldronMesh.Anchored = true
+                        cauldronMesh.CFrame = root.CFrame * CFrame.new(0, -12, 0)
+                        CU_LOG.count("Pilulas: caldeirao puxado para baixo do personagem para abrir")
+                    end)
+                    task.wait(0.06)
+                    pcall(function()
+                        if fireproximityprompt then
+                            fireproximityprompt(prompt)
+                        else
+                            prompt:InputHoldBegin()
+                            task.wait(0.05)
+                            prompt:InputHoldEnd()
+                        end
+                    end)
+                end
+            end
+            return false
+        end
+
+        -- Membaca 3 Kolom Slot Cauldron berdasarkan koordinat X relatif terhadap jendela ALCHEMY CAULDRON
+        local function getThreeColumnSlots(brewBtnObj)
+            local cauldronWin = brewBtnObj.Parent
+            while cauldronWin and cauldronWin ~= LocalPlayer.PlayerGui and cauldronWin.AbsoluteSize.Y < 220 do
+                cauldronWin = cauldronWin.Parent
+            end
+            if not cauldronWin then return nil end
+
+            local winX = cauldronWin.AbsolutePosition.X
+            local winW = math.max(cauldronWin.AbsoluteSize.X, 1)
+            local winY = cauldronWin.AbsolutePosition.Y
+            local brewY = brewBtnObj.AbsolutePosition.Y
+
+            local cols = {
+                [1] = {AddBtn = nil, RemoveBtn = nil, FilledHerb = nil, IsEmpty = false},
+                [2] = {AddBtn = nil, RemoveBtn = nil, FilledHerb = nil, IsEmpty = false},
+                [3] = {AddBtn = nil, RemoveBtn = nil, FilledHerb = nil, IsEmpty = false}
+            }
+
+            for _, obj in pairs(cauldronWin:GetDescendants()) do
+                if not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                    local posY = obj.AbsolutePosition.Y
+                    -- Hanya pindai elemen di area kotak slot (di bawah judul Cauldron dan di atas tombol Brew)
+                    if posY > (winY + 35) and posY < (brewY - 8) then
+                        local centerX = obj.AbsolutePosition.X + (obj.AbsoluteSize.X / 2)
+                        local relX = (centerX - winX) / winW
+
+                        local colIdx = 1
+                        if relX < 0.37 then
+                            colIdx = 1
+                        elseif relX <= 0.63 then
+                            colIdx = 2
+                        else
+                            colIdx = 3
+                        end
+
+                        local t = trimText(obj.Text)
+                        local clickTarget = obj:IsA("GuiButton") and obj or obj:FindFirstAncestorWhichIsA("GuiButton") or obj
+
+                        if t:find("add herb", 1, true) then
+                            cols[colIdx].IsEmpty = true
+                            cols[colIdx].AddBtn = clickTarget
+                        elseif t:find("remove", 1, true) then
+                            cols[colIdx].RemoveBtn = clickTarget
+                        else
+                            for _, hName in ipairs(Constants.HERBS_LIST) do
+                                if t == hName:lower() or t:find("^" .. hName:lower() .. "%s") then
+                                    cols[colIdx].FilledHerb = hName
+                                    if not cols[colIdx].RemoveBtn then
+                                        cols[colIdx].RemoveBtn = clickTarget
+                                    end
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            return cols
+        end
+
+        -- Memilih Herb dari jendela "Choose a herb" berdasarkan kesamaan baris horizontal (Y-Alignment)
+        local function selectHerbFromChooseModal(targetHerbName)
+            local modalHeader = findVisibleTextElement("choose a herb", false)
+            if not modalHeader then return false end
+
+            local modalWin = modalHeader.Parent
+            while modalWin and modalWin ~= LocalPlayer.PlayerGui and modalWin.AbsoluteSize.Y < 200 do
+                modalWin = modalWin.Parent
+            end
+            if not modalWin then modalWin = LocalPlayer.PlayerGui end
+
+            local targetLower = trimText(targetHerbName)
+            local scrollFrame = modalWin:FindFirstChildWhichIsA("ScrollingFrame", true)
+
+            local function findInCurrentView()
+                local candidates = {}
+                local visibleLabels = {}
+
+                for _, obj in pairs(modalWin:GetDescendants()) do
+                    if not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                        table.insert(visibleLabels, obj)
+                    end
+                end
+
+                for _, obj in ipairs(visibleLabels) do
+                    if trimText(obj.Text) == "choose" then
+                        local chooseBtn = obj:IsA("GuiButton") and obj or obj:FindFirstAncestorWhichIsA("GuiButton") or obj
+                        local cY = chooseBtn.AbsolutePosition.Y + (chooseBtn.AbsoluteSize.Y / 2)
+
+                        local lineTexts = {}
+                        for _, other in ipairs(visibleLabels) do
+                            if other ~= obj then
+                                local oY = other.AbsolutePosition.Y + (other.AbsoluteSize.Y / 2)
+                                if math.abs(oY - cY) < 30 then
+                                    table.insert(lineTexts, trimText(other.Text))
+                                end
+                            end
+                        end
+
+                        local combinedLine = table.concat(lineTexts, " ")
+                        local matchedRightHerb = false
+
+                        for _, hName in ipairs(Constants.HERBS_LIST) do
+                            local hLow = hName:lower()
+                            if combinedLine:find(hLow, 1, true) then
+                                if hLow == targetLower then
+                                    matchedRightHerb = true
+                                else
+                                    matchedRightHerb = false
+                                    break
+                                end
+                            end
+                        end
+
+                        if matchedRightHerb then
+                            local yearScore = 1
+                            if combinedLine:find("1000", 1, true) then yearScore = 4
+                            elseif combinedLine:find("100", 1, true) then yearScore = 3
+                            elseif combinedLine:find("10", 1, true) then yearScore = 2 end
+
+                            local qty = 1
+                            local qMatch = combinedLine:match("x(%d+)")
+                            if qMatch then qty = tonumber(qMatch) or 1 end
+
+                            if qty > 0 then
+                                table.insert(candidates, {
+                                    ChooseBtn = chooseBtn,
+                                    Score = yearScore
+                                })
+                            end
+                        end
+                    end
+                end
+
+                table.sort(candidates, function(a, b) return a.Score > b.Score end)
+                return candidates[1]
+            end
+
+            if scrollFrame then
+                scrollFrame.CanvasPosition = Vector2.new(0, 0)
+                task.wait(0.12)
+            end
+
+            local best = findInCurrentView()
+
+            if not best and scrollFrame then
+                for step = 1, 4 do
+                    scrollFrame.CanvasPosition = Vector2.new(0, step * 150)
+                    task.wait(0.15)
+                    best = findInCurrentView()
+                    if best then break end
+                end
+            end
+
+            if best and best.ChooseBtn then
+                triggerGuiClick(best.ChooseBtn, false, false)
+                return true
+            end
+            return false
+        end
+
+        local function handleStokeMinigame(stokeBtnObj)
+            local modalContainer = stokeBtnObj.Parent
+            while modalContainer and modalContainer ~= LocalPlayer.PlayerGui and modalContainer.AbsoluteSize.Y < 130 do
+                modalContainer = modalContainer.Parent
+            end
+            if not modalContainer then return end
+
+            local stokeY = stokeBtnObj.AbsolutePosition.Y
+            local initialX = {}
+            for _, obj in pairs(modalContainer:GetDescendants()) do
+                if obj:IsA("GuiObject") and isActuallyVisible(obj) and obj.AbsolutePosition.Y < stokeY then
+                    if obj.AbsoluteSize.X < 180 and obj.AbsoluteSize.Y <= 60 then
+                        initialX[obj] = obj.AbsolutePosition.X
+                    end
+                end
+            end
+
+            RunService.RenderStepped:Wait()
+            RunService.RenderStepped:Wait()
+            RunService.RenderStepped:Wait()
+
+            local cursorObj = nil
+            local maxDelta = 0
+            for obj, oldX in pairs(initialX) do
+                if obj and obj.Parent then
+                    local dX = math.abs(obj.AbsolutePosition.X - oldX)
+                    if dX > 0.4 and dX > maxDelta then
+                        maxDelta = dX
+                        cursorObj = obj
+                    end
+                end
+            end
+
+            local targetZoneObj = nil
+            local barTrackObj = nil
+            local refY = cursorObj and (cursorObj.AbsolutePosition.Y + cursorObj.AbsoluteSize.Y / 2) or (stokeY - 45)
+
+            for _, obj in pairs(modalContainer:GetDescendants()) do
+                if obj:IsA("GuiObject") and isActuallyVisible(obj) and obj ~= cursorObj and (not cursorObj or not obj:IsDescendantOf(cursorObj)) then
+                    local centerY = obj.AbsolutePosition.Y + (obj.AbsoluteSize.Y / 2)
+                    if math.abs(centerY - refY) < 35 then
+                        if obj.AbsoluteSize.X >= 180 and obj.AbsoluteSize.Y <= 50 then
+                            if not barTrackObj or obj.AbsoluteSize.X > barTrackObj.AbsoluteSize.X then barTrackObj = obj end
+                        elseif obj.AbsoluteSize.X >= 6 and obj.AbsoluteSize.X <= 90 and obj.AbsoluteSize.Y <= 45 then
+                            local dX = initialX[obj] and math.abs(obj.AbsolutePosition.X - initialX[obj]) or 0
+                            if dX < 0.2 and (not targetZoneObj or obj.AbsoluteSize.X < targetZoneObj.AbsoluteSize.X) then
+                                targetZoneObj = obj
+                            end
+                        end
+                    end
+                end
+            end
+
+            CU_LOG.add("PILULA", "Stoke", string.format("cursor=%s faixa=%s barra=%s", tostring(cursorObj and cursorObj.Name), tostring(targetZoneObj and targetZoneObj.Name), tostring(barTrackObj and barTrackObj.Name)), 2)
+            local startTime = tick()
+            local prevX = cursorObj and (cursorObj.AbsolutePosition.X + cursorObj.AbsoluteSize.X / 2) or nil
+
+            while State.autoPillActive and isActuallyVisible(stokeBtnObj) and (tick() - startTime < 4.0) do
+                if cursorObj then
+                    local curCenter = cursorObj.AbsolutePosition.X + (cursorObj.AbsoluteSize.X / 2)
+                    local velX = prevX and (curCenter - prevX) or 0
+                    prevX = curCenter
+                    local predictedX = curCenter + (velX * 1.15)
+
+                    local zMin, zMax
+                    if targetZoneObj then
+                        local zPos = targetZoneObj.AbsolutePosition.X
+                        local zSize = targetZoneObj.AbsoluteSize.X
+                        local pad = math.min(zSize * 0.2, 6)
+                        zMin = zPos + pad
+                        zMax = (zPos + zSize) - pad
+                    elseif barTrackObj then
+                        local bPos = barTrackObj.AbsolutePosition.X
+                        local bSize = barTrackObj.AbsoluteSize.X
+                        zMin = bPos + (bSize * 0.46)
+                        zMax = bPos + (bSize * 0.54)
+                    end
+
+                    if zMin and zMax and ((predictedX >= zMin and predictedX <= zMax) or (curCenter >= zMin and curCenter <= zMax)) then
+                        CU_LOG.count("Pilulas: Stoke apertado na faixa")
+                        triggerGuiClick(stokeBtnObj, true, false)
+                        pcall(function()
+                            if CultivationEvents and CultivationEvents:FindFirstChild("CauldronStoke") then
+                                CU_LOG.sent("CauldronStoke"); CultivationEvents.CauldronStoke:FireServer(true)
+                            end
+                        end)
+                        break
+                    end
+                end
+                RunService.RenderStepped:Wait()
+            end
+
+            State.isBrewingWaitClaim = true
+        end
+
+        while true do
+            if State.autoPillActive and not isUserTypingOrInMenu() and not State.isTeleportingZone then
+                openCauldronZeroLag()
+
+                -- STATE 1: Jika tombol Claim pil terlihat di layar
+                local visibleClaim = findVisibleTextElement("claim", true)
+                if visibleClaim then
+                    CU_LOG.count("Pilulas: botao Claim na tela")
+                    State.isBrewingWaitClaim = false
+                    pcall(function()
+                        if CultivationEvents and CultivationEvents:FindFirstChild("CauldronClaim") then
+                            CU_LOG.sent("CauldronClaim"); CultivationEvents.CauldronClaim:FireServer()
+                        end
+                    end)
+                    triggerGuiClick(visibleClaim, false, false)
+                    task.wait(0.45)
+
+                -- STATE 2: Jika minigame Stoke sedang muncul
+                else
+                    local stokeObj = findVisibleTextElement("stoke", true)
+                    if stokeObj then
+                        CU_LOG.count("Pilulas: minijogo Stoke")
+                        handleStokeMinigame(stokeObj)
+                        task.wait(0.4)
+
+                    -- STATE 3: Jika jendela "Choose a herb" sedang terbuka
+                    elseif findVisibleTextElement("choose a herb", false) then
+                        local recipe = Constants.PILL_RECIPES[State.selectedPill]
+                        local slotIdx = math.clamp(State.activeRecipeSlot or 1, 1, 3)
+                        local requiredHerb = recipe and recipe[slotIdx] or "Ginseng"
+
+                        local chosen = selectHerbFromChooseModal(requiredHerb)
+                        CU_LOG.count(chosen and "Pilulas: erva escolhida na lista" or "Pilulas: erva da receita nao achada na lista (Back)")
+                        CU_LOG.add("PILULA", "escolher erva", string.format("coluna %d: %s -> %s", slotIdx, tostring(requiredHerb), chosen and "escolhida" or "nao achada"), 3)
+                        if chosen then
+                            task.wait(0.55)
+                        else
+                            local backBtn = findVisibleTextElement("back", true)
+                            if backBtn then
+                                triggerGuiClick(backBtn, false, false)
+                            end
+                            task.wait(0.55)
+                        end
+
+                    -- STATE 4: Menu utama ALCHEMY CAULDRON
+                    else
+                        local brewBtn = findVisibleTextElement("brew", true)
+                        if brewBtn then
+                            local recipe = Constants.PILL_RECIPES[State.selectedPill]
+                            local cols = getThreeColumnSlots(brewBtn)
+
+                            if recipe and cols then
+                                local actionTaken = false
+
+                                for i = 1, 3 do
+                                    local c = cols[i]
+                                    local expectedHerb = recipe[i]
+
+                                    -- Jika kolom ke-i berisi herb yang SALAH, klik "Click to remove" pada kolom tersebut!
+                                    if c.FilledHerb and c.FilledHerb:lower() ~= expectedHerb:lower() and c.RemoveBtn then
+                                        State.activeRecipeSlot = i
+                                        CU_LOG.count("Pilulas: tirar erva errada")
+                                        CU_LOG.add("PILULA", "coluna " .. i, "tem " .. tostring(c.FilledHerb) .. ", a receita pede " .. tostring(expectedHerb), 3)
+                                        triggerGuiClick(c.RemoveBtn, false, false)
+                                        actionTaken = true
+                                        task.wait(0.5)
+                                        break
+                                    -- Jika kolom ke-i masih kosong ("Add herb"), klik "Add herb" pada kolom tersebut!
+                                    elseif c.IsEmpty and c.AddBtn then
+                                        State.activeRecipeSlot = i
+                                        CU_LOG.count("Pilulas: adicionar erva")
+                                        triggerGuiClick(c.AddBtn, false, false)
+                                        actionTaken = true
+                                        task.wait(0.5)
+                                        break
+                                    end
+                                end
+
+                                -- Jika ketiga kolom sudah berisi bahan yang 100% sesuai resep, klik Brew!
+                                if not actionTaken and cols[1].FilledHerb and cols[2].FilledHerb and cols[3].FilledHerb then
+                                    State.isBrewingWaitClaim = true
+                                    CU_LOG.count("Pilulas: Brew")
+                                    CU_LOG.add("PILULA", "Brew", tostring(State.selectedPill) .. ": " .. table.concat(recipe, ", "), 0)
+                                    triggerGuiClick(brewBtn, false, false)
+                                    task.wait(0.6)
+                                end
+                            end
+                        elseif State.isBrewingWaitClaim then
+                            -- STATE 5: Menunggu Brewing selesai -> kirim sinyal CauldronClaim di background tanpa lag
+                            pcall(function()
+                                if CultivationEvents and CultivationEvents:FindFirstChild("CauldronClaim") then
+                                    CU_LOG.sent("CauldronClaim"); CultivationEvents.CauldronClaim:FireServer()
+                                end
+                            end)
+                            task.wait(0.35)
+                        end
+                    end
+                end
+            end
+            task.wait(0.28)
+        end
+    end)
+end
+
+-------------------------------------------------------------------------
+-- 3. AUTO BREAKTHROUGH (ISOLATED SHRINKING RING TRACKER + REMOTE SYNC)
+-------------------------------------------------------------------------
+CU_LOG.spawnLoop("Breakthrough", function()
+    local function isGoldColor(col)
+        return (col.R > 0.75 and col.G > 0.55 and col.B < 0.42)
+    end
+
+    local function countSingleLetterLabels(container)
+        local count = 0
+        for _, d in pairs(container:GetDescendants()) do
+            if (d:IsA("TextLabel") or d:IsA("TextButton")) and isActuallyVisible(d) and d.Text:match("^%s*[A-Z]%s*$") then
+                count = count + 1
+            end
+        end
+        return count
+    end
+
+    local function getIsolatedCircleContainer(letterObj)
+        local curr = letterObj.Parent
+        if not curr or not curr:IsA("GuiObject") then return letterObj end
+        if curr.Parent and curr.Parent:IsA("GuiObject") and curr.Parent.AbsoluteSize.X <= 260 then
+            if countSingleLetterLabels(curr.Parent) <= 1 then
+                curr = curr.Parent
+            end
+        end
+        return curr
+    end
+
+    local function getCultivationHudState()
+        local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+        if not playerGui then return nil end
+
+        local st = {
+            realmName = nil, currentLayer = nil, maxLayers = 10,
+            qiPercent = nil, trialReadyBanner = false,
+            trialMinigameActive = false, breakthroughBtn = nil
+        }
+
+        for _, obj in pairs(playerGui:GetDescendants()) do
+            if obj ~= UI.ScreenGui and not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                local rawText = obj.Text or ""
+                local cleanLower = trimText(rawText)
+
+                if cleanLower:find("breakthrough trial", 1, true) or cleanLower:find("ring turns gold", 1, true) then
+                    st.trialMinigameActive = true
+                end
+                if cleanLower:find("realm trial ready", 1, true) then
+                    st.trialReadyBanner = true
+                end
+                if cleanLower == "breakthrough" then
+                    st.breakthroughBtn = obj
+                end
+
+                local pctMatch = rawText:match("^%s*(%d+)%%%s*$")
+                if pctMatch then st.qiPercent = tonumber(pctMatch) end
+
+                if rawText:find("Qi") and (rawText:find("·") or rawText:find("-")) then
+                    local afterPrefix = rawText:match("Qi%s*[·%-]%s*(.+)$")
+                    if afterPrefix then
+                        local realmPart, romanPart = afterPrefix:match("^(.+)%s+([IVX]+)%s*$")
+                        if realmPart and romanPart and Constants.ROMAN_TO_NUMBER[romanPart] then
+                            st.realmName = realmPart
+                            st.currentLayer = Constants.ROMAN_TO_NUMBER[romanPart]
+                            st.maxLayers = Constants.REALM_MAX_LAYERS[trimText(realmPart)] or 10
+                        end
+                    end
+                end
+            end
+        end
+        return st
+    end
+
+    while true do
+        if State.autoBreakthroughActive then
+            local hud = getCultivationHudState()
+            CU_LOG.hud(hud)
+            if hud then
+                if hud.trialMinigameActive then
+                    UI.RealmStatusLabel.Text = "Status: Trial Aktif (Menunggu Cincin Mengecil & Emas)"
+                elseif hud.realmName and hud.currentLayer then
+                    UI.RealmStatusLabel.Text = string.format(
+                        "Status: %s (Layer %d/%d) | Qi: %s%%",
+                        hud.realmName, hud.currentLayer, hud.maxLayers, tostring(hud.qiPercent or 0)
+                    )
+                end
+
+                if hud.trialMinigameActive then
+                    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+                    local camViewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+
+                    if playerGui then
+                        for _, obj in pairs(playerGui:GetDescendants()) do
+                            if obj ~= UI.ScreenGui and not obj:IsDescendantOf(UI.ScreenGui) and (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+                                local posY, posX = obj.AbsolutePosition.Y, obj.AbsolutePosition.X
+                                local inTrialArea = (posY > camViewport.Y * 0.12 and posY < camViewport.Y * 0.74)
+                                    and (posX > camViewport.X * 0.14 and posX < camViewport.X * 0.86)
+
+                                if inTrialArea then
+                                    local cleanChar = obj.Text:match("^%s*([A-Z])%s*$")
+                                    if cleanChar and obj.AbsoluteSize.X >= 16 and obj.AbsoluteSize.X <= 130 then
+                                        local nodeContainer = getIsolatedCircleContainer(obj)
+
+                                        if not State.trialNodesData[nodeContainer] or State.trialNodesData[nodeContainer].char ~= cleanChar then
+                                            State.trialNodesData[nodeContainer] = {
+                                                char = cleanChar, spawnTime = tick(),
+                                                maxOuterSize = 0, triggered = false
+                                            }
+                                        end
+
+                                        local nData = State.trialNodesData[nodeContainer]
+                                        local age = tick() - nData.spawnTime
+                                        local currentOuterSize = 0
+                                        local innerCircleSize = obj.Parent and obj.Parent.AbsoluteSize.X or obj.AbsoluteSize.X
+
+                                        for _, desc in pairs(nodeContainer:GetDescendants()) do
+                                            if desc:IsA("GuiObject") and desc ~= obj and isActuallyVisible(desc) then
+                                                local sz = desc.AbsoluteSize.X
+                                                if sz >= 30 and sz < innerCircleSize then innerCircleSize = sz end
+                                                if sz > currentOuterSize then currentOuterSize = sz end
+                                            end
+                                        end
+
+                                        if currentOuterSize > nData.maxOuterSize then
+                                            nData.maxOuterSize = currentOuterSize
+                                        end
+
+                                        if not nData.triggered and age >= 0.22 then
+                                            local hasShrunk = (nData.maxOuterSize > 0 and currentOuterSize < (nData.maxOuterSize * 0.82))
+                                            local isRingGoldNow = false
+
+                                            for _, desc in pairs(nodeContainer:GetDescendants()) do
+                                                if not desc:IsDescendantOf(obj) and desc ~= obj then
+                                                    if desc:IsA("UIStroke") and isGoldColor(desc.Color) then
+                                                        isRingGoldNow = true
+                                                        break
+                                                    elseif (desc:IsA("ImageLabel") or desc:IsA("ImageButton")) and isActuallyVisible(desc) and isGoldColor(desc.ImageColor3) then
+                                                        isRingGoldNow = true
+                                                        break
+                                                    elseif desc:IsA("Frame") and isActuallyVisible(desc) and desc.BackgroundTransparency < 0.85 and isGoldColor(desc.BackgroundColor3) then
+                                                        isRingGoldNow = true
+                                                        break
+                                                    end
+                                                end
+                                            end
+
+                                            local inSweetSpotSize = (nData.maxOuterSize > innerCircleSize * 1.15)
+                                                and (currentOuterSize <= innerCircleSize * 1.24)
+                                                and (currentOuterSize >= innerCircleSize * 0.88)
+
+                                            if (isRingGoldNow and (hasShrunk or age >= 0.35)) or inSweetSpotSize then
+                                                nData.triggered = true
+                                                CU_LOG.count("Breakthrough: letra do minijogo acionada")
+                                                CU_LOG.add("TRIAL", cleanChar, string.format("idade %.2fs | anel %.0f (maior %.0f, interno %.0f) | encolheu=%s dourado=%s ponto_certo=%s", age, currentOuterSize, nData.maxOuterSize, innerCircleSize, tostring(hasShrunk), tostring(isRingGoldNow), tostring(inSweetSpotSize)), 0)
+                                                triggerKeyPress(cleanChar)
+                                                triggerGuiClick(obj, true, true)
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    RunService.RenderStepped:Wait()
+                else
+                    table.clear(State.trialNodesData)
+                    local isReady = (hud.qiPercent and hud.qiPercent >= 100) or hud.trialReadyBanner
+                    if isReady and not isUserTypingOrInMenu() then
+                        CU_LOG.count("Breakthrough: pronto (Qi 100% ou banner)")
+                        if hud.breakthroughBtn then
+                            CU_LOG.count("Breakthrough: botao Breakthrough clicado")
+                            triggerGuiClick(hud.breakthroughBtn, false, false)
+                        end
+                        pcall(function()
+                            if CultivationEvents then
+                                if State.autoBodyActive and CultivationEvents:FindFirstChild("BodyBreakthrough") then
+                                    CU_LOG.sent("BodyBreakthrough"); CultivationEvents.BodyBreakthrough:FireServer()
+                                elseif CultivationEvents:FindFirstChild("Breakthrough") then
+                                    CU_LOG.sent("Breakthrough"); CultivationEvents.Breakthrough:FireServer()
+                                end
+                            end
+                        end)
+                        task.wait(0.7)
+                    else
+                        task.wait(0.25)
+                    end
+                end
+            else
+                task.wait(0.3)
+            end
+        else
+            task.wait(0.4)
+        end
+    end
+end)
+
+-------------------------------------------------------------------------
+-- 4. AUTO CLICK BONUS QI ORB (DIRECT REMOTE + SILENT UI CLICK)
+-------------------------------------------------------------------------
+do
+    if CultivationEvents then
+        local spawnOrbRem = CultivationEvents:FindFirstChild("SpawnCultivationOrb")
+        local clickOrbRem = CultivationEvents:FindFirstChild("CultivationOrbClicked")
+        if spawnOrbRem and clickOrbRem and spawnOrbRem:IsA("RemoteEvent") and clickOrbRem:IsA("RemoteEvent") then
+            spawnOrbRem.OnClientEvent:Connect(function(...)
+                if State.autoQiOrbActive then
+                    local args = {...}
+                    task.wait(0.08)
+                    pcall(function()
+                        CU_LOG.sent("CultivationOrbClicked (args do SpawnCultivationOrb)")
+                        clickOrbRem:FireServer(table.unpack(args))
+                        clickOrbRem:FireServer()
+                    end)
+                end
+            end)
+        end
+    end
+
+    CU_LOG.spawnLoop("Qi Orb", function()
+        local function isInsideExcludedWindow(guiObj)
+            local curr = guiObj
+            while curr and curr ~= LocalPlayer.PlayerGui do
+                local n = curr.Name:lower()
+                if n:find("realm") or n:find("cauldron") or n:find("alchemy") or n:find("quest")
+                    or n:find("inventory") or n:find("shop") or n:find("skill") or n:find("setting")
+                    or n:find("sect") or n:find("party") or n:find("cultivator") or n:find("pack")
+                    or n:find("chat") or n:find("leaderboard") or n:find("hotbar") then
+                    return true
+                end
+                curr = curr.Parent
+            end
+            return false
+        end
+
+        while true do
+            if State.autoQiOrbActive and not isUserTypingOrInMenu() then
+                local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+                local camViewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+
+                if playerGui then
+                    for _, obj in pairs(playerGui:GetDescendants()) do
+                        if obj ~= UI.ScreenGui and not obj:IsDescendantOf(UI.ScreenGui) and obj:IsA("GuiObject") and isActuallyVisible(obj) then
+                            if not isInsideExcludedWindow(obj) then
+                                local nameLow = obj.Name:lower()
+                                local parentNameLow = obj.Parent and obj.Parent.Name:lower() or ""
+                                local sizeX, sizeY = obj.AbsoluteSize.X, obj.AbsoluteSize.Y
+                                local posX, posY = obj.AbsolutePosition.X, obj.AbsolutePosition.Y
+
+                                local inOrbZone = (posX > camViewport.X * 0.14 and posX < camViewport.X * 0.82)
+                                    and (posY > camViewport.Y * 0.10 and posY < camViewport.Y * 0.72)
+                                local isSquareOrbSize = (sizeX >= 36 and sizeX <= 160) and (math.abs(sizeX - sizeY) <= 18)
+
+                                if inOrbZone and isSquareOrbSize then
+                                    local isQiOrb = false
+                                    if nameLow:find("orb") or nameLow:find("bonus") or nameLow:find("burst") or nameLow:find("yinyang") or parentNameLow:find("orb") then
+                                        isQiOrb = true
+                                    elseif (obj:IsA("ImageButton") or obj:IsA("TextButton")) then
+                                        local txt = obj:IsA("TextButton") and trimText(obj.Text) or ""
+                                        if txt == "" then isQiOrb = true end
+                                    end
+
+                                    if isQiOrb then
+                                        pcall(function()
+                                            if CultivationEvents and CultivationEvents:FindFirstChild("CultivationOrbClicked") then
+                                                CU_LOG.sent("CultivationOrbClicked"); CultivationEvents.CultivationOrbClicked:FireServer()
+                                            end
+                                        end)
+                                        CU_LOG.count("Qi Orb: orb clicado na tela")
+                                        CU_LOG.add("ORB", "tela", obj:GetFullName(), 5)
+                                        triggerGuiClick(obj, false, false)
+                                        task.wait(0.16)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(0.12)
+        end
+    end)
+end
+
+-------------------------------------------------------------------------
+-- 5. AUTO KILL PLAYER (TARGET LOCK + AUTO SWORD + AUTO SKILLS)
+-------------------------------------------------------------------------
+do
+    RunService.RenderStepped:Connect(function()
+        if State.autoKillActive and State.selectedTargetPlayerName ~= "None" and not State.isTeleportingZone then
+            local targetPlr = Players:FindFirstChild(State.selectedTargetPlayerName)
+            if targetPlr and targetPlr.Character then
+                local targetRoot = targetPlr.Character:FindFirstChild("HumanoidRootPart")
+                local targetHum = targetPlr.Character:FindFirstChildWhichIsA("Humanoid")
+                local myChar = LocalPlayer.Character
+                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+
+                if targetRoot and myRoot and (not targetHum or targetHum.Health > 0) then
+                    local lockPos = (targetRoot.CFrame * CFrame.new(0, 0, 3.5)).Position
+                    myRoot.CFrame = CFrame.new(lockPos, targetRoot.Position)
+                    myRoot.Velocity = Vector3.new(0, 0, 0)
+                end
+            end
+        end
+    end)
+
+    CU_LOG.spawnLoop("Auto Kill", function()
+        while true do
+            if State.autoKillActive and State.selectedTargetPlayerName ~= "None" and not isUserTypingOrInMenu() and not State.isTeleportingZone then
+                local targetPlr = Players:FindFirstChild(State.selectedTargetPlayerName)
+                if targetPlr and targetPlr.Character then
+                    local targetHum = targetPlr.Character:FindFirstChildWhichIsA("Humanoid")
+                    if not targetHum or targetHum.Health > 0 then
+                        local char = LocalPlayer.Character
+                        if char then
+                            local hum = char:FindFirstChildWhichIsA("Humanoid")
+                            local backpack = LocalPlayer:FindFirstChild("Backpack")
+                            local equippedTool = char:FindFirstChildWhichIsA("Tool")
+                            if not equippedTool and backpack and hum then
+                                for _, item in pairs(backpack:GetChildren()) do
+                                    if item:IsA("Tool") then
+                                        CU_LOG.count("Kill: equipou " .. item.Name)
+                                        hum:EquipTool(item)
+                                        equippedTool = item
+                                        break
+                                    end
+                                end
+                            end
+                            if equippedTool then CU_LOG.count("Kill: tool:Activate"); pcall(function() equippedTool:Activate() end) end
+                            local okMouse, errMouse = pcall(function()
+                                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+                                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+                            end)
+                            CU_LOG.count(okMouse and "Kill: clique mouse VIM em (0,0)" or "Kill: clique mouse VIM ERRO")
+                            if not okMouse then CU_LOG.error("Kill mouse VIM", errMouse) end
+                        end
+
+                        if State.autoSkillKillActive and (tick() - State.lastSkillCycleTime >= 0.35) then
+                            State.lastSkillCycleTime = tick()
+                            local keyToPress = Constants.COMBAT_SKILL_KEYS[State.skillIndex]
+                            State.skillIndex = (State.skillIndex % #Constants.COMBAT_SKILL_KEYS) + 1
+                            local okSkill, errSkill = pcall(function()
+                                VirtualInputManager:SendKeyEvent(true, keyToPress, false, game)
+                                task.wait(0.02)
+                                VirtualInputManager:SendKeyEvent(false, keyToPress, false, game)
+                            end)
+                            CU_LOG.key("skill " .. keyToPress.Name, okSkill, errSkill)
+                        end
+                    end
+                end
+                task.wait(0.12)
+            else
+                task.wait(0.35)
+            end
+        end
+    end)
+end
+
+
+-------------------------------------------------------------------------
+-- CU1: AMBIENTE, ESPIAO DE REMOTES, CUSTO DA VARREDURA DA TELA, STATUS E TXT AUTOMATICO
+-------------------------------------------------------------------------
+do
+    local caps, plat = CU_LOG.env()
+    CU_LOG.add("INFO", "Ambiente", caps)
+    CU_LOG.add("INFO", "Ambiente", plat)
+    CU_LOG.try("Espiao de remotes", CU_LOG.watchRemotes, CultivationEvents)
+    -- Mede quanto custa UMA varredura da tela igual as que o script faz varias vezes por segundo.
+    local function measureScan()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then return end
+        local t0 = os.clock()
+        local all = pg:GetDescendants()
+        local texts = 0
+        for _, obj in ipairs(all) do
+            if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then texts += 1 end
+        end
+        local ms = (os.clock() - t0) * 1000
+        local s = CU_LOG.scans
+        s[#s + 1] = {objects = #all, texts = texts, ms = ms}
+        if #s > 120 then table.remove(s, 1) end
+        CU_LOG.add("DESEMPENHO", "Varredura", string.format("%d objetos, %d textos visiveis, %.0f ms", #all, texts, ms), 60)
+    end
+    CU_LOG.spawnLoop("Log (medicao e TXT automatico)", function()
+        task.wait(5)
+        while true do
+            CU_LOG.try("Medicao da varredura", measureScan)
+            CU_LOG.add("STATUS", "Funcoes", CU_LOG.activeList(), 60)
+            if CU_LOG.autoSave and writefile and os.clock() - CU_LOG.lastAutoSave >= CU_LOG.autoSaveEvery then
+                CU_LOG.lastAutoSave = os.clock()
+                CU_LOG.save("CultivationHub_log_auto.txt")
+            end
+            task.wait(30)
+        end
+    end)
+end
