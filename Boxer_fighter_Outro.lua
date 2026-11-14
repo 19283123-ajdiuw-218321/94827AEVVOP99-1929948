@@ -58,6 +58,7 @@ local function loadConfig()
 end
 
 loadConfig()
+for _, cuKey in ipairs({"autoFarmActive", "autoPillActive", "autoBreakthroughActive", "autoQiOrbActive", "autoRealmActive", "autoBodyActive", "autoKillActive"}) do Config[cuKey] = false end
 
 -------------------------------------------------------------------------
 -- CENTRALIZED STATE & CONSTANTS (ANTI-REGISTER LIMIT < 35 LOCALS)
@@ -177,7 +178,7 @@ local UI = {}
 -- enviados e eventos do servidor recebidos, cliques na tela por metodo, teclas simuladas, toggles e o custo das
 -- varreduras da tela. Botoes na aba "Logs".
 -------------------------------------------------------------------------
-CU_LOG={version="CU2.2",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
+CU_LOG={version="CU2.3",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
     remotes={},remoteOrder={},toggles={},startedAt=os.clock(),startedStamp=os.date("%Y-%m-%d %H:%M:%S"),
     scans={},autoSave=true,autoSaveEvery=300,lastAutoSave=os.clock()}
 function CU_LOG.onError(e) return debug.traceback(tostring(e),2) end
@@ -488,7 +489,7 @@ CU2={version="CU2",s={},stopped=false,running={},conns={},tabs={},ui={labels={},
         brewsStarted=0,brewsDone=0,herbsOk=0,herbsMaybe=0,herbsFail=0,clashEvents=0,clashHits=0,afk=0},
     NO_DAMAGE_SECS=8,
     defaults={mobFarm=false,turbo=true,aoe=true,skills=false,offset=3,sectClash=false,
-        skipTrial=true,blindBreak=false,bodyBreak=false,tribulation=true,soul=false,orbTouch=false,
+        skipTrial=true,blindBreak=false,bodyBreak=false,tribulation=false,soul=false,orbTouch=false,
         herb2=false,herbFilter=1,streamer=false,brew=false,brewRecipe=1,brewYear=1,
         dailyAuto=false,antiAfk=true,selectedMobs={}},
     LABEL_ORDER={"mobFarm","skills","sectClash","blindBreak","bodyBreak","tribulation","soul","orbTouch","herb2","streamer","brew","dailyAuto"},
@@ -535,6 +536,8 @@ function CU2.loadSettings(saved)
         if value~=nil and type(value)==type(v) then s[k]=value else s[k]=v end
     end
     if type(s.selectedMobs)~="table" or s.selectedMobs==CU2.defaults.selectedMobs then s.selectedMobs={} end
+    -- Nada liga sozinho ao abrir o script: toda funcao comeca desligada (ficam so as opcoes: posicao, turbo, filtros...).
+    for _,k in ipairs(CU2.LABEL_ORDER) do s[k]=false end
     for _,p in ipairs({{"offset",#CU2.OFFSETS},{"herbFilter",#CU2.HERB_FILTERS},{"brewRecipe",#CU2.BREW_RECIPES},{"brewYear",#CU2.BREW_YEARS}}) do
         s[p[1]]=math.clamp(math.floor(tonumber(s[p[1]]) or 1),1,p[2])
     end
@@ -1505,7 +1508,7 @@ do
     titleText.Size = UDim2.new(1, -100, 1, 0)
     titleText.Position = UDim2.new(0, 15, 0, 0)
     titleText.BackgroundTransparency = 1
-    titleText.Text = "Cultivation Hub | CU2.2 (Top76 + log)"
+    titleText.Text = "Cultivation Hub | CU2.3 (Top76 + log)"
     titleText.TextColor3 = Color3.fromRGB(220, 220, 220)
     titleText.TextSize = 14
     titleText.Font = Enum.Font.GothamBold
@@ -2722,9 +2725,7 @@ do
     -- 3. Loop Responsif (Mengecek setiap 0.15 detik, langsung aktif begitu karakter berhenti)
     CU_LOG.spawnLoop("Realm/Body", function()
         while true do
-            local cu2Busy = (State.autoRealmActive or State.autoBodyActive) and CU2.busy()
-            if cu2Busy then CU_LOG.count("Realm/Body: pausado (" .. cu2Busy .. ")") end
-            if (State.autoRealmActive or State.autoBodyActive) and not isUserTypingOrInMenu() and not State.isTeleportingZone and not State.autoFarmActive and not State.autoKillActive and not cu2Busy then
+            if (State.autoRealmActive or State.autoBodyActive) and not isUserTypingOrInMenu() and not State.isTeleportingZone and not State.autoFarmActive and not State.autoKillActive then
                 local char = LocalPlayer.Character
                 local hum = char and char:FindFirstChildWhichIsA("Humanoid")
                 local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -3804,7 +3805,7 @@ do
     end
     CU_LOG.spawnLoop("Log (medicao e TXT automatico)", function()
         task.wait(5)
-        while true do
+        while not CU2.stopped do
             CU_LOG.try("Medicao da varredura", measureScan)
             CU_LOG.add("STATUS", "Funcoes", CU_LOG.activeList(), 60)
             if CU_LOG.autoSave and writefile and os.clock() - CU_LOG.lastAutoSave >= CU_LOG.autoSaveEvery then
@@ -4657,11 +4658,11 @@ do
         end
     end)
     listen("MapEvent",function(action,payload) CU2.onMapEvent(action,payload) end)
-    -- Tribulacao, causa da morte e mensagens do servidor: continuam gravando mesmo com a janela fechada (so o log).
+    -- Tribulacao, causa da morte e mensagens do servidor (o X desliga tambem).
     local function watch(name,fn)
         local r=CU2.remote(name)
         if r and r:IsA("RemoteEvent") then
-            r.OnClientEvent:Connect(function(...) CU_LOG.try("Ouvinte "..name,fn,...) end)
+            CU2.track(r.OnClientEvent:Connect(function(...) CU_LOG.try("Ouvinte "..name,fn,...) end))
         else
             CU_LOG.add("AVISO","CU2","ouvinte "..name.." nao ligado: o remote nao existe",0)
         end
@@ -5001,11 +5002,6 @@ end
 -- ===== INICIO: mortes, anti-AFK, religa o que estava ligado =====
 do
     CU_LOG.add("INFO","CU2","remotes do Top76 neste jogo: "..CU2.remoteCheck(),0)
-    local saved={}
-    for _,k in ipairs(CU2.LABEL_ORDER) do
-        if CU2.s[k] then saved[#saved+1]=CU2.LABELS[k] end
-    end
-    CU_LOG.add("INFO","CU2","funcoes CU2 salvas como ligadas (religam agora): "..(#saved>0 and table.concat(saved,", ") or "nenhuma"),0)
     local function hookChar(char)
         local hum=char:WaitForChild("Humanoid",10)
         if not hum then
@@ -5032,8 +5028,5 @@ do
             CU_LOG.error("Anti-AFK",err)
         end
     end))
-    for _,key in ipairs(CU2.LABEL_ORDER) do
-        if CU2.on(key) then CU2.start(key) end
-    end
     task.spawn(function() CU_LOG.try("CU2 lista de monstros",CU2.rebuildMobList) end)
 end
