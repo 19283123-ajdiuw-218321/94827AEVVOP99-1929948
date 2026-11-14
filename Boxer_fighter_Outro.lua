@@ -178,7 +178,7 @@ local UI = {}
 -- enviados e eventos do servidor recebidos, cliques na tela por metodo, teclas simuladas, toggles e o custo das
 -- varreduras da tela. Botoes na aba "Logs".
 -------------------------------------------------------------------------
-CU_LOG={version="CU2.4",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
+CU_LOG={version="CU2.5",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
     remotes={},remoteOrder={},toggles={},startedAt=os.clock(),startedStamp=os.date("%Y-%m-%d %H:%M:%S"),
     scans={},autoSave=true,autoSaveEvery=300,lastAutoSave=os.clock()}
 function CU_LOG.onError(e) return debug.traceback(tostring(e),2) end
@@ -483,7 +483,7 @@ CU_LOG.add("INFO","Inicio","Cultivation Hub carregado com o log "..CU_LOG.versio
 CU2={version="CU2",s={},stopped=false,running={},conns={},tabs={},ui={labels={},setters={},mobRows={}},
     fights={},deaths={},events={},sentArgs={},expanded={},
     blacklist=setmetatable({},{__mode="k"}),herbCooldown=setmetatable({},{__mode="k"}),
-    herbCounts={},herbCountsText="",tribs={},trib=nil,serverMsgs={},serverMsgOrder={},cauldronStatus="?",lastHerbPickAt=0,lastBrewNote="ainda nao tentou",
+    herbCounts={},herbCountsText="",wbRounds={},wbRound=nil,tribs={},trib=nil,serverMsgs={},serverMsgOrder={},cauldronStatus="?",lastHerbPickAt=0,lastBrewNote="ainda nao tentou",
     mob=nil,mobBusy=false,targetPart=nil,event=nil,
     stats={hitAccepted=nil,trialSkips=0,trialClosed=0,trialOpen=0,soulTrips=0,soulCatches=0,soulGone=0,soulHerbs=0,
         brewsStarted=0,brewsDone=0,herbsOk=0,herbsMaybe=0,herbsFail=0,clashEvents=0,clashHits=0,afk=0},
@@ -491,13 +491,13 @@ CU2={version="CU2",s={},stopped=false,running={},conns={},tabs={},ui={labels={},
     defaults={mobFarm=false,turbo=true,aoe=true,skills=false,offset=3,sectClash=false,
         skipTrial=true,blindBreak=false,bodyBreak=false,tribulation=false,soul=false,orbTouch=false,
         herb2=false,herbFilter=1,streamer=false,brew=false,brewRecipe=1,brewYear=1,
-        dailyAuto=false,antiAfk=true,selectedMobs={}},
-    LABEL_ORDER={"mobFarm","skills","sectClash","blindBreak","bodyBreak","tribulation","soul","orbTouch","herb2","streamer","brew","dailyAuto"},
-    LABELS={mobFarm="Farm monstros",skills="Skills servidor",sectClash="Sect Clash",blindBreak="Breakthrough as cegas",
+        dailyAuto=false,worldBoss=false,antiAfk=true,selectedMobs={}},
+    LABEL_ORDER={"mobFarm","skills","sectClash","blindBreak","bodyBreak","tribulation","soul","orbTouch","herb2","streamer","brew","dailyAuto","worldBoss"},
+    LABELS={worldBoss="World Boss",mobFarm="Farm monstros",skills="Skills servidor",sectClash="Sect Clash",blindBreak="Breakthrough as cegas",
         bodyBreak="Body Breakthrough servidor",tribulation="Tribulation",soul="Soul Projection",orbTouch="Orbs servidor",
         herb2="Ervas mapa todo",streamer="Streamer",brew="Pilulas servidor",dailyAuto="Daily auto"},
     EXCLUSIVE={herb2=true,brew=true},
-    MOB_CONTAINERS={"BanditCamp","CultivatorCamps","WorldBoss"},
+    MOB_CONTAINERS={"BanditCamp","CultivatorCamps"},
     SKILL_KEYS={"Z","X","C","V"},
     HERB_NAMES={"Ginseng","Azure Lotus","Verdant Moss","Golden Fern","Violet Sage"},
     HERB_FILTERS={"Todas (1000 anos primeiro)","So 1000 anos","So a erva da aba Auto"},
@@ -618,8 +618,20 @@ function CU2.char()
 end
 
 -- Quem esta movendo o personagem agora. Auto Realm/Body e o farm de ervas da aba Auto esperam enquanto isso.
+-- World Boss (Top76 V25): a pasta workspace.WorldBoss tem os atributos State (idle/warning/rising/fight) e SpawnAt.
+function CU2.wbState()
+    local f=Workspace:FindFirstChild("WorldBoss")
+    if not f then return "idle",0 end
+    return tostring(f:GetAttribute("State") or "idle"),tonumber(f:GetAttribute("SpawnAt")) or 0
+end
+function CU2.wbActive()
+    if not CU2.on("worldBoss") then return false end
+    local st=CU2.wbState()
+    return st=="warning" or st=="rising" or st=="fight"
+end
 function CU2.busy()
     if CU2.stopped then return nil end
+    if CU2.wbActive() then return "World Boss" end
     if CU2.event and CU2.on("sectClash") then return "Sect Clash" end
     if CU2.mobBusy then return "farm de monstros" end
     if CU2.on("herb2") then return "ervas mapa todo" end
@@ -628,7 +640,7 @@ function CU2.busy()
 end
 function CU2.herbBlocked()
     if CU2.stopped then return nil end
-    local r=(CU2.event and CU2.on("sectClash") and "Sect Clash") or (CU2.mobBusy and "farm de monstros")
+    local r=(CU2.wbActive() and "World Boss") or (CU2.event and CU2.on("sectClash") and "Sect Clash") or (CU2.mobBusy and "farm de monstros")
         or (LocalPlayer:GetAttribute("SoulProjecting")==true and "Soul Projection") or nil
     if r and State.autoFarmActive then CU_LOG.count("Ervas: pausado ("..r..")") end
     return r
@@ -855,6 +867,7 @@ function CU2.enemyFighter(ev)
 end
 
 function CU2.onDeath(char)
+    if CU2.wbRound then CU2.wbRound.deaths+=1 end
     local root=char and char:FindFirstChild("HumanoidRootPart")
     local f=CU2.mob
     local line=string.format("%s morreu | ligado: %s | alvo: %s | Sect Clash: %s | posicao %s",
@@ -972,6 +985,14 @@ function CU2.onServerMessage(text)
     m.example=text
 end
 
+-- Fim de uma rodada do World Boss: linha para o TXT (estados, boss, HP, golpes, mortes, bau).
+function CU2.wbRoundLine(r,why)
+    return string.format("%s %s: %s | HP %s -> %s de %s | %d golpes | %d mortes | bau aberto %d | estados %s | fim: %s",
+        r.startStamp,CU_LOG.secs(os.clock()-r.startAt),tostring(r.boss or "boss nao apareceu"),
+        r.hp0 and tostring(math.floor(r.hp0)) or "?",r.hpLast and tostring(math.floor(r.hpLast)) or "?",r.max and tostring(math.floor(r.max)) or "?",
+        r.hits,r.deaths,r.coffers or 0,r.states,why)
+end
+
 -- Plataforma invisivel embaixo do personagem (Top76): segura o personagem nas posicoes embaixo da terra.
 function CU2.getPlatform()
     local p=CU2.platform
@@ -988,7 +1009,7 @@ function CU2.getPlatform()
     return p
 end
 function CU2.parkPlatformIfIdle()
-    if CU2.platform and not CU2.mobBusy and not CU2.on("herb2") and not (CU2.event and CU2.on("sectClash")) then
+    if CU2.platform and not CU2.mobBusy and not CU2.on("herb2") and not (CU2.event and CU2.on("sectClash")) and not CU2.wbActive() then
         CU2.platform.CFrame=CFrame.new(0,9999,0)
     end
 end
@@ -1163,6 +1184,12 @@ function CU2.sections()
     if #CU2.fights>0 then text=text.."[LUTAS: ultimas "..#CU2.fights.."]\n"..table.concat(CU2.fights,"\n").."\n\n" end
     if #CU2.deaths>0 then text=text.."[MORTES: "..#CU2.deaths.."]\n"..table.concat(CU2.deaths,"\n").."\n\n" end
     if #CU2.events>0 then text=text.."[SECT CLASH]\n"..table.concat(CU2.events,"\n").."\n\n" end
+    if #CU2.wbRounds>0 or CU2.wbRound then
+        local st,spawnAt=CU2.wbState()
+        text=text.."[WORLD BOSS: Auto World Boss "..(CU2.on("worldBoss") and "ligado" or "desligado")..", estado agora "..st
+            ..(spawnAt>0 and string.format(", proximo em %s",CU_LOG.secs(spawnAt-Workspace:GetServerTimeNow())) or "").."]\n"
+            ..table.concat(CU2.wbRounds,"\n")..(CU2.wbRound and ("\nem andamento desde "..CU2.wbRound.startStamp) or "").."\n\n"
+    end
     if #CU2.tribs>0 or CU2.trib then
         local cur=CU2.trib and string.format("\nem andamento desde %s: %d raios, %d acertos, %d erros",CU2.trib.startStamp,#CU2.trib.order,CU2.trib.hits,CU2.trib.misses) or ""
         text=text.."[TRIBULACAO: Auto Tribulation "..(CU2.on("tribulation") and "ligado" or "DESLIGADO").."]\n"..table.concat(CU2.tribs,"\n")..cur.."\n\n"
@@ -1504,7 +1531,7 @@ do
     titleText.Size = UDim2.new(1, -100, 1, 0)
     titleText.Position = UDim2.new(0, 15, 0, 0)
     titleText.BackgroundTransparency = 1
-    titleText.Text = "Cultivation Hub | CU2.4 (Top76 + log)"
+    titleText.Text = "Cultivation Hub | CU2.5 (Top76 + log)"
     titleText.TextColor3 = Color3.fromRGB(220, 220, 220)
     titleText.TextSize = 14
     titleText.Font = Enum.Font.GothamBold
@@ -1590,9 +1617,9 @@ do
     end
 
     local autoTabBtn = makeTabBtn("Auto", 10, true)
-    local locationTabBtn = makeTabBtn("Location", 124, false)
-    local settingTabBtn = makeTabBtn("Setting", 162, false)
-    local logsTabBtn = makeTabBtn("Logs", 200, false)
+    local locationTabBtn = makeTabBtn("Location", 162, false)
+    local settingTabBtn = makeTabBtn("Setting", 200, false)
+    local logsTabBtn = makeTabBtn("Logs", 238, false)
     local logsPage = Instance.new("ScrollingFrame")
     logsPage.Size = UDim2.new(1, 0, 1, 0)
     logsPage.BackgroundTransparency = 1
@@ -1603,7 +1630,7 @@ do
     logsPage.Parent = contentArea
     UI.LogsPage = logsPage
     -- CU2: abas Combate e Extra (o conteudo e montado no fim do arquivo).
-    for cuIndex, cuName in ipairs({"Combate", "Extra"}) do
+    for cuIndex, cuName in ipairs({"Combate", "Extra", "Boss"}) do
         local cuPage = Instance.new("ScrollingFrame")
         cuPage.Size = UDim2.new(1, 0, 1, 0)
         cuPage.BackgroundTransparency = 1
@@ -3834,6 +3861,7 @@ end
 
 -- ===== COMBATE: FARM DE MONSTROS (Top76) =====
 function CU2.mobPauseReason()
+    if CU2.wbActive() then return "World Boss" end
     if CU2.event and CU2.on("sectClash") then return "Sect Clash" end
     if State.autoKillActive then return "Auto Kill ligado" end
     if State.isTeleportingZone then return "teleporte de zona" end
@@ -4073,6 +4101,10 @@ function CU2.findEventEnemy(ev,enemyName)
 end
 function CU2.clashLoop()
     while CU2.on("sectClash") do
+        while CU2.wbActive() and CU2.on("sectClash") do
+            CU2.setLabel("clash","Sect Clash: pausado (World Boss)")
+            task.wait(0.5)
+        end
         local ev=CU2.event
         if ev and Workspace:GetServerTimeNow()>ev.endsAt+10 then
             CU2.events[#CU2.events+1]=os.date("%H:%M:%S").." acabou pelo horario (o servidor nao mandou 'end')"
@@ -4142,7 +4174,7 @@ function CU2.soulLoop()
     local sessionStart,tripCatches=0,0
     while CU2.on("soul") do
         local char,hrp,hum=CU2.char()
-        local other=(CU2.mobBusy and "farm de monstros") or (CU2.on("herb2") and "ervas mapa todo")
+        local other=(CU2.wbActive() and "World Boss") or (CU2.mobBusy and "farm de monstros") or (CU2.on("herb2") and "ervas mapa todo")
             or ((CU2.event and CU2.on("sectClash")) and "Sect Clash") or nil
         if not hrp or hum.Health<=0 then
             task.wait(0.5)
@@ -4476,7 +4508,7 @@ function CU2.herb2Loop()
     CU_LOG.add("ERVA2","inicio","ligado: filtro "..CU2.HERB_FILTERS[CU2.s.herbFilter]..", "..CU2.countKeys(CU2.herbPrompts).." prompts de erva conhecidos",0)
     local zoneIdx,angle=1,0
     while CU2.on("herb2") do
-        local pause=((CU2.event and CU2.on("sectClash")) and "Sect Clash") or (CU2.mobBusy and "farm de monstros")
+        local pause=(CU2.wbActive() and "World Boss") or ((CU2.event and CU2.on("sectClash")) and "Sect Clash") or (CU2.mobBusy and "farm de monstros")
             or (State.isTeleportingZone and "teleporte de zona") or (State.autoKillActive and "Auto Kill") or nil
         if pause then
             CU2.setLabel("herb2","Ervas: pausado ("..pause..")")
@@ -4581,6 +4613,184 @@ function CU2.dailyLoop()
     end
 end
 
+-- ===== WORLD BOSS (Top76 V25) =====
+-- No aviso vai para a arena (World Boss Ash Plain); quando o boss aparece, fica a 4 studs da parte do corpo dele mais
+-- perto (para nao sair do alcance), bate com CombatHit (+Turbo) e a arma; no fim abre o "Sovereign's Coffer".
+function CU2.wbStatusText()
+    local st,spawnAt=CU2.wbState()
+    local left=spawnAt-Workspace:GetServerTimeNow()
+    if st=="idle" and left>0 then return string.format("estado idle, proximo em %d:%02d",math.floor(left/60),math.floor(left%60)) end
+    return "estado "..st..(left>0 and string.format(", nasce em %ds",math.floor(left)) or "")
+end
+function CU2.wbModel()
+    local f=Workspace:FindFirstChild("WorldBoss")
+    if not f then return nil end
+    for _,child in ipairs(f:GetChildren()) do
+        if child:IsA("Model") and (child:GetAttribute("IsWorldBoss")==true or child:FindFirstChildOfClass("Humanoid")) then
+            local hum=child:FindFirstChildOfClass("Humanoid")
+            local hrp=child:FindFirstChild("HumanoidRootPart") or child.PrimaryPart or child:FindFirstChildWhichIsA("BasePart")
+            if hum and hum.Health>0 and hrp then return child,hrp,hum end
+        end
+    end
+    return nil
+end
+function CU2.wbArenaPos()
+    if CU2.wbArena then return CU2.wbArena end
+    local map=Workspace:FindFirstChild("Map_sacred-mountain")
+    local lm=map and map:FindFirstChild("Landmarks")
+    local ash=lm and lm:FindFirstChild("World Boss Ash Plain")
+    if ash then
+        local sum,n=Vector3.new(0,0,0),0
+        for _,d in ipairs(ash:GetDescendants()) do
+            if d:IsA("BasePart") then
+                sum+=d.Position
+                n+=1
+            end
+        end
+        if n>0 then
+            CU2.wbArena=sum/n
+            CU_LOG.add("WORLDBOSS","arena","World Boss Ash Plain em "..CU2.describe(CU2.wbArena),0)
+            return CU2.wbArena
+        end
+    end
+    local anchors=Workspace:FindFirstChild("MapAnchors")
+    if anchors then
+        for _,d in ipairs(anchors:GetDescendants()) do
+            if d:IsA("BasePart") then
+                local nm=d.Name:lower()
+                if nm:find("boss") or nm:find("ash") or nm:find("sovereign") or nm:find("sacred") then return d.Position end
+            end
+        end
+    end
+    return Vector3.new(900,130,2100)
+end
+function CU2.wbStandCFrame(model,bhrp,hrp)
+    local now=os.clock()
+    if CU2.wbPartsModel~=model or now>(CU2.wbPartsAt or 0) then
+        CU2.wbPartsModel=model
+        CU2.wbPartsAt=now+2
+        CU2.wbParts={}
+        for _,part in ipairs(model:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name~="HumanoidRootPart" and part.Transparency<1 then CU2.wbParts[#CU2.wbParts+1]=part end
+        end
+    end
+    local ref=hrp and hrp.Position or bhrp.Position
+    local best,bestD=nil,math.huge
+    for _,part in ipairs(CU2.wbParts) do
+        if part.Parent then
+            local lp=part.CFrame:PointToObjectSpace(ref)
+            local h=part.Size*0.5
+            local wp=part.CFrame:PointToWorldSpace(Vector3.new(math.clamp(lp.X,-h.X,h.X),math.clamp(lp.Y,-h.Y,h.Y),math.clamp(lp.Z,-h.Z,h.Z)))
+            local d=(wp-ref).Magnitude
+            if d<bestD then
+                bestD=d
+                best=wp
+            end
+        end
+    end
+    if best then
+        local dir=ref-best
+        local flat=Vector3.new(dir.X,0,dir.Z)
+        flat=flat.Magnitude<0.1 and Vector3.new(0,0,1) or flat.Unit
+        return CFrame.new(best+flat*4+Vector3.new(0,1,0))
+    end
+    return bhrp.CFrame*CFrame.new(0,0,8)
+end
+function CU2.wbOpenCoffer()
+    local opened=0
+    for _=1,6 do
+        local fx=Workspace:FindFirstChild("WorldBossFX")
+        if fx and fireproximityprompt then
+            for _,d in ipairs(fx:GetDescendants()) do
+                if d:IsA("ProximityPrompt") and d.ObjectText=="Sovereign's Coffer" then
+                    local ok,err=pcall(fireproximityprompt,d)
+                    if ok then opened+=1 else CU_LOG.error("World Boss: abrir bau",err) end
+                end
+            end
+        end
+        if opened>0 then break end
+        task.wait(1)
+    end
+    return opened
+end
+function CU2.wbEndRound(why)
+    local r=CU2.wbRound
+    if not r then return end
+    CU2.wbRound=nil
+    r.coffers=(why=="boss acabou") and CU2.wbOpenCoffer() or 0
+    local line=CU2.wbRoundLine(r,why)
+    CU2.wbRounds[#CU2.wbRounds+1]=line
+    if #CU2.wbRounds>10 then table.remove(CU2.wbRounds,1) end
+    CU_LOG.count("World Boss: rodadas")
+    CU_LOG.add("WORLDBOSS","fim",line,0)
+end
+function CU2.worldBossLoop()
+    local nextTool=0
+    CU_LOG.add("WORLDBOSS","ligado",CU2.wbStatusText(),0)
+    while CU2.on("worldBoss") do
+        local st=CU2.wbState()
+        local model,bhrp,bhum=CU2.wbModel()
+        if st=="warning" or st=="rising" or st=="fight" then
+            local r=CU2.wbRound
+            if not r then
+                r={startStamp=os.date("%H:%M:%S"),startAt=os.clock(),hits=0,deaths=0,states=st,lastState=st}
+                CU2.wbRound=r
+                CU_LOG.add("WORLDBOSS","comecou","estado "..st,0)
+            elseif r.lastState~=st then
+                r.states=r.states.." > "..st
+                r.lastState=st
+                CU_LOG.add("WORLDBOSS","estado",st,0)
+            end
+            local char,hrp,hum=CU2.char()
+            if hrp and hum.Health>0 then
+                if not model then
+                    CU2.setLabel("wb","World Boss: "..st.." | indo para a arena / esperando o boss")
+                    local arena=CU2.wbArenaPos()
+                    if (hrp.Position-arena).Magnitude>60 then
+                        CU2.safeTeleport(hrp,CFrame.new(arena+Vector3.new(0,5,0)),nil,function() return not CU2.on("worldBoss") end)
+                    end
+                    task.wait(0.25)
+                else
+                    if not r.boss then
+                        r.boss=model.Name
+                        r.hp0=bhum.Health
+                        r.max=bhum.MaxHealth
+                        CU_LOG.add("WORLDBOSS","boss",string.format("%s HP %d/%d",model.Name,math.floor(bhum.Health),math.floor(bhum.MaxHealth)),0)
+                    end
+                    r.hpLast=bhum.Health
+                    CU2.targetPart=bhrp
+                    CU2.setLabel("wb",string.format("World Boss: %s | %s %d%%",st,model.Name,math.floor(bhum.Health/math.max(bhum.MaxHealth,1)*100)))
+                    CU2.safeTeleport(hrp,CU2.wbStandCFrame(model,bhrp,hrp),bhrp)
+                    if st=="fight" and bhum.Health>0 then
+                        if CU2.fire("CombatHit",model,1) then r.hits+=1 end
+                        if CU2.s.turbo and CU2.fire("CombatHit",model,1) then r.hits+=1 end
+                        local now=os.clock()
+                        if now>=nextTool then
+                            nextTool=now+(CU2.s.turbo and 0.10 or 0.20)
+                            CU2.swing(char,hum)
+                        end
+                    end
+                    task.wait(CU2.s.turbo and 0.06 or 0.12)
+                end
+            else
+                task.wait(0.3)
+            end
+        else
+            if CU2.wbRound then
+                CU2.targetPart=nil
+                CU2.wbEndRound("boss acabou")
+                CU2.parkPlatformIfIdle()
+            end
+            CU2.setLabel("wb","World Boss: "..CU2.wbStatusText())
+            task.wait(0.8)
+        end
+    end
+    CU2.wbEndRound("desligado")
+    CU2.targetPart=nil
+    CU2.parkPlatformIfIdle()
+    CU2.setLabel("wb","World Boss: desligado")
+end
+
 CU2.LOOPS={
     mobFarm={"Combate: farm de monstros",CU2.mobFarmLoop},
     skills={"Combate: skills pelo servidor",CU2.skillsLoop},
@@ -4592,7 +4802,8 @@ CU2.LOOPS={
     herb2={"Ervas mapa todo",CU2.herb2Loop},
     streamer={"Streamer",CU2.streamerLoop},
     brew={"Pilulas servidor",CU2.brewLoop},
-    dailyAuto={"Daily automatico",CU2.dailyLoop}}
+    dailyAuto={"Daily automatico",CU2.dailyLoop},
+    worldBoss={"World Boss",CU2.worldBossLoop}}
 -- Um loop por chave: ligar de novo enquanto o anterior ainda roda nao cria outro.
 function CU2.start(key)
     local def=CU2.LOOPS[key]
@@ -4667,6 +4878,10 @@ do
     end)
     watch("DeathCause",function(...) CU2.onDeathCause(...) end)
     watch("GlobalMessage",function(text) CU2.onServerMessage(text) end)
+    watch("WorldBoss",function(action,sub,...)
+        CU_LOG.count("World Boss: aviso do servidor "..tostring(action).." "..tostring(sub))
+        CU_LOG.add("WORLDBOSS","servidor",tostring(action)..", "..tostring(sub)..(select("#",...)>0 and (", "..CU2.describeArgs(...)) or ""),0)
+    end)
 end
 
 -- ===== ABAS "COMBATE" E "EXTRA" =====
@@ -4974,12 +5189,23 @@ do
         toggle(e,"Anti-AFK","antiAfk")
     end
 
+    local b=CU2.tabs.Boss and CU2.tabs.Boss.page
+    if b then
+        setupPage(b)
+        header(b,"World Boss (Top76): espera na arena, luta colado no boss e abre o bau no fim",Color3.fromRGB(230,110,90))
+        toggle(b,"Auto World Boss","worldBoss",Color3.fromRGB(210,50,70))
+        label(b,"World Boss: desligado","wb",34)
+        label(b,"Enquanto o boss esta ativo, o farm de monstros, as ervas mapa todo e o Sect Clash pausam e voltam sozinhos depois. O Turbo da aba Combate vale aqui tambem.",nil,48)
+    end
+
     -- Atualiza a lista de monstros e o caldeirao so com a aba aberta (no celular, varrer a toa pesa).
     CU_LOG.spawnLoop("CU2 telas",function()
         while not CU2.stopped and UI.ScreenGui and UI.ScreenGui.Parent do
             if UI.MainFrame and UI.MainFrame.Visible then
                 local ct=CU2.tabs.Combate
                 if ct and ct.page.Visible then CU2.refreshMobRows() end
+                local bt=CU2.tabs.Boss
+                if bt and bt.page.Visible and not CU2.on("worldBoss") then CU2.setLabel("wb","World Boss: desligado | "..CU2.wbStatusText()) end
                 local et=CU2.tabs.Extra
                 if et and et.page.Visible then
                     CU2.setLabel("brew",string.format("Caldeirao: %s | Brew enviados %d, terminados %d\nErvas: %s\nUltimo: %s",tostring(CU2.cauldronStatus),
