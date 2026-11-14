@@ -178,7 +178,7 @@ local UI = {}
 -- enviados e eventos do servidor recebidos, cliques na tela por metodo, teclas simuladas, toggles e o custo das
 -- varreduras da tela. Botoes na aba "Logs".
 -------------------------------------------------------------------------
-CU_LOG={version="CU2.3",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
+CU_LOG={version="CU2.4",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
     remotes={},remoteOrder={},toggles={},startedAt=os.clock(),startedStamp=os.date("%Y-%m-%d %H:%M:%S"),
     scans={},autoSave=true,autoSaveEvery=300,lastAutoSave=os.clock()}
 function CU_LOG.onError(e) return debug.traceback(tostring(e),2) end
@@ -497,7 +497,7 @@ CU2={version="CU2",s={},stopped=false,running={},conns={},tabs={},ui={labels={},
         bodyBreak="Body Breakthrough servidor",tribulation="Tribulation",soul="Soul Projection",orbTouch="Orbs servidor",
         herb2="Ervas mapa todo",streamer="Streamer",brew="Pilulas servidor",dailyAuto="Daily auto"},
     EXCLUSIVE={herb2=true,brew=true},
-    MOB_CONTAINERS={"BanditCamp","CultivatorCamps","WorldBoss","BlockingDummy","TrainingDummy"},
+    MOB_CONTAINERS={"BanditCamp","CultivatorCamps","WorldBoss"},
     SKILL_KEYS={"Z","X","C","V"},
     HERB_NAMES={"Ginseng","Azure Lotus","Verdant Moss","Golden Fern","Violet Sage"},
     HERB_FILTERS={"Todas (1000 anos primeiro)","So 1000 anos","So a erva da aba Auto"},
@@ -994,7 +994,7 @@ function CU2.parkPlatformIfIdle()
 end
 -- Teleporte do Top76: ate 38 studs vai direto; mais longe, passos de 36 studs a cada 0,1s (~360 studs/s), abaixo dos
 -- limites do anti-cheat do jogo citados por ele (MovementGuardRules: SLACK 40, MAX_FLAT_SPEED 400).
--- Correcao: carrega a area com LocalPlayer:RequestStreamAroundAsync (ele chamava no workspace, que nao tem esse metodo).
+-- Sem carregar a area antes da viagem: LocalPlayer:RequestStreamAroundAsync travava o farm (CU2.2, monstro a 775 studs).
 function CU2.safeTeleport(hrp,targetCFrame,lookPart,abortFn,platformDrop)
     if not hrp or not targetCFrame then return false end
     local targetPos=targetCFrame.Position
@@ -1003,10 +1003,6 @@ function CU2.safeTeleport(hrp,targetCFrame,lookPart,abortFn,platformDrop)
     local drop=platformDrop or -1
     local startPos=hrp.Position
     local flat=Vector2.new(targetPos.X-startPos.X,targetPos.Z-startPos.Z).Magnitude
-    if flat>300 then
-        local ok,err=pcall(function() LocalPlayer:RequestStreamAroundAsync(targetPos,2) end)
-        if not ok then CU_LOG.error("Carregar area (RequestStreamAroundAsync)",err) end
-    end
     local function apply(cf)
         platform.CFrame=cf*CFrame.new(0,drop,0)
         hrp.AssemblyLinearVelocity=Vector3.zero
@@ -1508,7 +1504,7 @@ do
     titleText.Size = UDim2.new(1, -100, 1, 0)
     titleText.Position = UDim2.new(0, 15, 0, 0)
     titleText.BackgroundTransparency = 1
-    titleText.Text = "Cultivation Hub | CU2.3 (Top76 + log)"
+    titleText.Text = "Cultivation Hub | CU2.4 (Top76 + log)"
     titleText.TextColor3 = Color3.fromRGB(220, 220, 220)
     titleText.TextSize = 14
     titleText.Font = Enum.Font.GothamBold
@@ -4461,8 +4457,6 @@ function CU2.patrolStep(hrp,zoneIdx,angle)
     CU_LOG.count("Ervas mapa todo: patrulha")
     CU_LOG.add("ERVA2","patrulha",string.format("nenhuma erva valida (%d prompts conhecidos, filtro %s); indo para (%.0f, %.0f, %.0f), ponto %d/%d",
         CU2.countKeys(CU2.herbPrompts),CU2.HERB_FILTERS[CU2.s.herbFilter],nextPos.X,nextPos.Y,nextPos.Z,zoneIdx,#points),20,"patrulha")
-    local ok,err=pcall(function() LocalPlayer:RequestStreamAroundAsync(nextPos,2) end)
-    if not ok then CU_LOG.error("Ervas mapa todo: RequestStreamAroundAsync",err) end
     local platform=CU2.getPlatform()
     local startPos=hrp.Position
     local steps=math.max(1,math.ceil((nextPos-startPos).Magnitude/36))
@@ -4737,7 +4731,7 @@ function CU2.rebuildMobList()
         l.Size=UDim2.new(1,0,0,40)
         l.BackgroundTransparency=1
         l.TextWrapped=true
-        l.Text="Nenhum monstro nos acampamentos (BanditCamp, CultivatorCamps, WorldBoss, bonecos). Chegue perto de um e toque em Escanear."
+        l.Text="Nenhum monstro nos acampamentos (BanditCamp, CultivatorCamps, WorldBoss). Chegue perto de um e toque em Escanear."
         l.TextColor3=Color3.fromRGB(170,170,170)
         l.TextSize=10
         l.Font=Enum.Font.Gotham
