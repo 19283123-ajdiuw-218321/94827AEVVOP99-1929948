@@ -30,7 +30,8 @@ local Config = {
     selectedQiZone = "Verdant Valley",
     selectedBodyZone = "Dusty Courtyard",
     flySpeed = 60,
-    toggleKeyName = "RightShift"
+    toggleKeyName = "RightShift",
+    cu2 = {}
 }
 
 local function saveConfig()
@@ -176,7 +177,7 @@ local UI = {}
 -- enviados e eventos do servidor recebidos, cliques na tela por metodo, teclas simuladas, toggles e o custo das
 -- varreduras da tela. Botoes na aba "Logs".
 -------------------------------------------------------------------------
-CU_LOG={version="CU1",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
+CU_LOG={version="CU2",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
     remotes={},remoteOrder={},toggles={},startedAt=os.clock(),startedStamp=os.date("%Y-%m-%d %H:%M:%S"),
     scans={},autoSave=true,autoSaveEvery=300,lastAutoSave=os.clock()}
 function CU_LOG.onError(e) return debug.traceback(tostring(e),2) end
@@ -357,6 +358,7 @@ function CU_LOG.env()
     has("getconnections",getconnections)
     has("firesignal",firesignal)
     has("fireproximityprompt",fireproximityprompt)
+    has("firetouchinterest",firetouchinterest)
     has("writefile",writefile)
     has("readfile",readfile)
     has("isfile",isfile)
@@ -376,6 +378,7 @@ function CU_LOG.activeList()
         {"autoBodyActive","Auto Body"},{"autoBreakthroughActive","Breakthrough"},{"autoQiOrbActive","Qi Orb"},{"autoKillActive","Auto Kill"}}) do
         if State[p[1]] then out[#out+1]=p[2] end
     end
+    if CU2 then for _,n in ipairs(CU2.activeNames()) do out[#out+1]=n end end
     return #out>0 and table.concat(out,", ") or "nenhuma"
 end
 function CU_LOG.summary()
@@ -430,7 +433,7 @@ function CU_LOG.dump(compact)
         tostring(State.selectedTargetPlayerName),tostring(State.flySpeed),
         envCaps,envPlat,CU_LOG.scanText(),CU_LOG.remoteList and table.concat(CU_LOG.remoteList,", ") or "?")
     local toggles=#CU_LOG.toggles>0 and ("[TOGGLES: liga/desliga em ordem]\n"..table.concat(CU_LOG.toggles,"\n").."\n\n") or ""
-    local body=header..CU_LOG.errorDump()..CU_LOG.summary()..CU_LOG.remoteDump()..toggles
+    local body=header..CU_LOG.errorDump()..(CU2 and CU2.safeSections() or "")..CU_LOG.summary()..CU_LOG.remoteDump()..toggles
     local list=CU_LOG.entries
     if not compact then
         return body.."[EVENTOS: "..#list.." linhas]\n"..table.concat(list,"\n")
@@ -467,6 +470,632 @@ function CU_LOG.copy()
     return true,#text
 end
 CU_LOG.add("INFO","Inicio","Cultivation Hub carregado com o log "..CU_LOG.version)
+
+-------------------------------------------------------------------------
+-- CU2: TUDO DO SCRIPT DO TOP76 (github.com/Top76/Cultivation-Unbound, "Murim Hub V24") DENTRO DO NOSSO HUB
+-- O jeito dele: mandar os comandos direto para o servidor (CombatHit, UseSkill, CauldronStartBrew,
+-- BreakthroughMinigameResult...), sem tecla e sem clique na tela, por isso funciona no celular.
+-- Tudo na tabela global CU2 (nenhum local novo no topo: limite de 200 registradores).
+-- Aqui: configuracao salva, estado e as funcoes de calculo (testadas no validador). As abas "Combate" e
+-- "Extra", os ouvintes do servidor e os loops ficam no fim do arquivo ("CU2: ABAS, OUVINTES E LOOPS").
+-------------------------------------------------------------------------
+CU2={version="CU2",s={},stopped=false,running={},conns={},tabs={},ui={labels={},setters={},mobRows={}},
+    fights={},deaths={},events={},sentArgs={},expanded={},
+    blacklist=setmetatable({},{__mode="k"}),herbCooldown=setmetatable({},{__mode="k"}),
+    herbCounts={},herbCountsText="",cauldronStatus="?",lastHerbPickAt=0,lastBrewNote="ainda nao tentou",
+    mob=nil,mobBusy=false,targetPart=nil,event=nil,
+    stats={hitAccepted=nil,trialSkips=0,trialClosed=0,trialOpen=0,soulTrips=0,soulCatches=0,soulGone=0,soulHerbs=0,
+        brewsStarted=0,brewsDone=0,herbsOk=0,herbsMaybe=0,herbsFail=0,clashEvents=0,clashHits=0,afk=0},
+    NO_DAMAGE_SECS=8,
+    defaults={mobFarm=false,turbo=true,aoe=true,skills=false,offset=3,sectClash=false,
+        skipTrial=true,blindBreak=false,bodyBreak=false,tribulation=false,soul=false,orbTouch=false,
+        herb2=false,herbFilter=1,streamer=false,brew=false,brewRecipe=1,brewYear=1,
+        dailyAuto=false,antiAfk=true,selectedMobs={}},
+    LABEL_ORDER={"mobFarm","skills","sectClash","blindBreak","bodyBreak","tribulation","soul","orbTouch","herb2","streamer","brew","dailyAuto"},
+    LABELS={mobFarm="Farm monstros",skills="Skills servidor",sectClash="Sect Clash",blindBreak="Breakthrough as cegas",
+        bodyBreak="Body Breakthrough servidor",tribulation="Tribulation",soul="Soul Projection",orbTouch="Orbs servidor",
+        herb2="Ervas mapa todo",streamer="Streamer",brew="Pilulas servidor",dailyAuto="Daily auto"},
+    EXCLUSIVE={herb2=true,brew=true},
+    MOB_CONTAINERS={"BanditCamp","CultivatorCamps","WorldBoss","BlockingDummy","TrainingDummy"},
+    SKILL_KEYS={"Z","X","C","V"},
+    HERB_NAMES={"Ginseng","Azure Lotus","Verdant Moss","Golden Fern","Violet Sage"},
+    HERB_FILTERS={"Todas (1000 anos primeiro)","So 1000 anos","So a erva da aba Auto"},
+    BREW_RECIPES={"Pilula da aba Auto","Qualquer erva (3 iguais)"},
+    BREW_YEARS={0,10,100,1000},
+    TOP76_REMOTES={"CombatHit","UseSkill","MapEvent","CollectHerb","HerbInventoryUpdate","CauldronStartBrew","CauldronClaim",
+        "CauldronStoke","CauldronStateUpdate","Breakthrough","BreakthroughMinigameResult","StartBreakthroughMinigame",
+        "BodyBreakthrough","BodyBreakthroughCutsceneDone","Tribulation","SoulProjection","SpiritWorld","CultivationOrbClicked",
+        "ZoneChanged","ClaimReward","StartMeditate","StartPushup","CultivateResumed"},
+    TRIBULATION_ARGS={"absorb",14,-0.014265060424804688},
+    OFFSETS={
+        {"Embaixo da terra, bem fundo (-12)",Vector3.new(0,-12,0)},
+        {"Embaixo da terra, fundo (-8)",Vector3.new(0,-8,0)},
+        {"Embaixo da terra, medio (-5)",Vector3.new(0,-5,0)},
+        {"Embaixo da terra, raso (-3)",Vector3.new(0,-3,0)},
+        {"Em cima, baixo (+4)",Vector3.new(0,4,0)},
+        {"Em cima, medio (+6)",Vector3.new(0,6,0)},
+        {"Em cima, alto (+10)",Vector3.new(0,10,0)},
+        {"Atras, perto (3)",Vector3.new(0,0,3)},
+        {"Atras, longe (5)",Vector3.new(0,0,5)},
+        {"No meio do monstro (0)",Vector3.new(0,0,0)}},
+    FALLBACK_POINTS={Vector3.new(0,120,0),Vector3.new(-350,140,2200),Vector3.new(900,130,2100),
+        Vector3.new(-2800,150,-2100),Vector3.new(2500,1500,1000)}}
+CU2.HERB_IDS={}
+for i,name in ipairs(CU2.HERB_NAMES) do
+    CU2.HERB_IDS[name]=i
+    CU2.HERB_IDS[(name:lower():gsub("[%s_%-]",""))]=i
+end
+
+-- Configuracao: Config.cu2 (salva no mesmo JSON do hub). Valor salvo so vale se tiver o mesmo tipo do padrao.
+function CU2.loadSettings(saved)
+    local s={}
+    for k,v in pairs(CU2.defaults) do
+        local value=nil
+        if type(saved)=="table" then value=saved[k] end
+        if value~=nil and type(value)==type(v) then s[k]=value else s[k]=v end
+    end
+    if type(s.selectedMobs)~="table" or s.selectedMobs==CU2.defaults.selectedMobs then s.selectedMobs={} end
+    for _,p in ipairs({{"offset",#CU2.OFFSETS},{"herbFilter",#CU2.HERB_FILTERS},{"brewRecipe",#CU2.BREW_RECIPES},{"brewYear",#CU2.BREW_YEARS}}) do
+        s[p[1]]=math.clamp(math.floor(tonumber(s[p[1]]) or 1),1,p[2])
+    end
+    CU2.s=s
+    Config.cu2=s
+    return s
+end
+CU2.loadSettings(Config.cu2)
+
+function CU2.on(key) return (not CU2.stopped) and CU2.s[key]==true end
+function CU2.save()
+    Config.cu2=CU2.s
+    saveConfig()
+end
+function CU2.track(conn)
+    CU2.conns[#CU2.conns+1]=conn
+    return conn
+end
+function CU2.isV3(v) return typeof(v)=="Vector3" end
+
+-- Texto curto de qualquer valor (tabelas ate 2 niveis), para o TXT mostrar exatamente o que foi enviado/recebido.
+function CU2.describe(v,depth)
+    local t=typeof(v)
+    if t=="Instance" then return v.ClassName..":"..v.Name end
+    if t=="Vector3" then return string.format("(%.0f, %.0f, %.0f)",v.X,v.Y,v.Z) end
+    if t=="table" then
+        depth=depth or 0
+        if depth>=2 then return "{...}" end
+        local parts,n={},0
+        for k,val in pairs(v) do
+            n+=1
+            if n>10 then parts[#parts+1]="..." break end
+            parts[#parts+1]=tostring(k).."="..CU2.describe(val,depth+1)
+        end
+        return "{"..table.concat(parts,",").."}"
+    end
+    if t=="number" then return (v==math.floor(v)) and tostring(v) or string.format("%.4f",v) end
+    return CU_LOG.clean(tostring(v),60)
+end
+function CU2.describeArgs(...)
+    local out={}
+    for i=1,select("#",...) do out[#out+1]=CU2.describe((select(i,...))) end
+    return CU_LOG.clean(table.concat(out,", "),400)
+end
+
+-- Remotes: todo envio passa aqui (conta no [RESUMO], mostra os 3 primeiros envios com os argumentos, erro vai para [ERROS]).
+function CU2.remote(name)
+    return CultivationEvents and CultivationEvents:FindFirstChild(name)
+end
+function CU2.fire(name,...)
+    local r=CU2.remote(name)
+    if not r then
+        CU_LOG.count("Servidor (remote nao existe): "..name)
+        CU_LOG.add("AVISO","CU2","o remote "..name.." nao existe em CultivationEvents (o jogo mudou o nome?)",60)
+        return false
+    end
+    CU_LOG.sent(name)
+    local n=(CU2.sentArgs[name] or 0)+1
+    CU2.sentArgs[name]=n
+    if n<=3 then CU_LOG.add("ENVIADO",name,"#"..n..": "..CU2.describeArgs(...)) end
+    local ok,err=pcall(r.FireServer,r,...)
+    if not ok then CU_LOG.error("Enviar "..name,err) end
+    return ok
+end
+function CU2.remoteCheck()
+    local out={}
+    for _,name in ipairs(CU2.TOP76_REMOTES) do out[#out+1]=name.."="..(CU2.remote(name) and "sim" or "NAO") end
+    return table.concat(out,", ")
+end
+
+function CU2.char()
+    local char=LocalPlayer.Character
+    if not char then return nil end
+    local hrp=char:FindFirstChild("HumanoidRootPart")
+    local hum=char:FindFirstChildOfClass("Humanoid")
+    if hrp and hum then return char,hrp,hum end
+    return nil
+end
+
+-- Quem esta movendo o personagem agora. Auto Realm/Body e o farm de ervas da aba Auto esperam enquanto isso.
+function CU2.busy()
+    if CU2.stopped then return nil end
+    if CU2.event and CU2.on("sectClash") then return "Sect Clash" end
+    if CU2.mobBusy then return "farm de monstros" end
+    if CU2.on("herb2") then return "ervas mapa todo" end
+    if LocalPlayer:GetAttribute("SoulProjecting")==true then return "Soul Projection" end
+    return nil
+end
+function CU2.herbBlocked()
+    if CU2.stopped then return nil end
+    local r=(CU2.event and CU2.on("sectClash") and "Sect Clash") or (CU2.mobBusy and "farm de monstros")
+        or (LocalPlayer:GetAttribute("SoulProjecting")==true and "Soul Projection") or nil
+    if r and State.autoFarmActive then CU_LOG.count("Ervas: pausado ("..r..")") end
+    return r
+end
+function CU2.activeNames()
+    local out={}
+    for _,k in ipairs(CU2.LABEL_ORDER) do
+        if CU2.on(k) then out[#out+1]=CU2.LABELS[k] end
+    end
+    return out
+end
+function CU2.offsetText() return CU2.OFFSETS[CU2.s.offset][1] end
+function CU2.offsetVec() return CU2.OFFSETS[CU2.s.offset][2] end
+function CU2.herbName(id) return CU2.HERB_NAMES[id] or tostring(id) end
+function CU2.countKeys(t)
+    local n=0
+    for _ in pairs(t or {}) do n+=1 end
+    return n
+end
+
+-- Uma funcao nossa e a do Top76 que fazem a mesma coisa nao rodam juntas.
+function CU2.setToggle(key,val)
+    CU2.s[key]=val
+    CU2.save()
+    local setter=CU2.ui.setters[key]
+    if setter then setter(val) end
+end
+function CU2.exclusive(kind)
+    if kind=="herb2" and State.autoFarmActive then
+        State.autoFarmActive=false
+        Config.autoFarmActive=false
+        if UI.SetHerbSwitch then UI.SetHerbSwitch(false) end
+        CU2.cancelHerbTween()
+        saveConfig()
+        CU_LOG.add("INFO","CU2","'autofarm herb' (aba Auto) desligado porque 'Auto Ervas mapa todo' ligou",0)
+    elseif kind=="brew" and State.autoPillActive then
+        State.autoPillActive=false
+        Config.autoPillActive=false
+        if UI.SetPillSwitch then UI.SetPillSwitch(false) end
+        saveConfig()
+        CU_LOG.add("INFO","CU2","'Autocreate pills' (aba Auto) desligado porque 'Auto Pilulas pelo servidor' ligou",0)
+    elseif kind=="herb" and CU2.s.herb2 then
+        CU2.setToggle("herb2",false)
+        CU_LOG.add("INFO","CU2","'Auto Ervas mapa todo' desligado porque 'autofarm herb' (aba Auto) ligou",0)
+    elseif kind=="pill" and CU2.s.brew then
+        CU2.setToggle("brew",false)
+        CU_LOG.add("INFO","CU2","'Auto Pilulas pelo servidor' desligado porque 'Autocreate pills' (aba Auto) ligou",0)
+    end
+end
+function CU2.cancelHerbTween()
+    if State.activeFarmTween then
+        CU_LOG.try("CU2 cancelar voo da erva",function() State.activeFarmTween:Cancel() end)
+        State.activeFarmTween=nil
+    end
+    if State.activeFarmVelocity then
+        CU_LOG.try("CU2 remover BodyVelocity da erva",function() State.activeFarmVelocity:Destroy() end)
+        State.activeFarmVelocity=nil
+    end
+end
+
+-- Ervas: chave do inventario do servidor "tipo_ano" (ex.: "1_1000" ou "Ginseng_1000").
+-- Devolve o ID da erva (1 Ginseng, 2 Azure Lotus, 3 Verdant Moss, 4 Golden Fern, 5 Violet Sage), o ano e o valor
+-- de herbType que o servidor espera de volta (o mesmo texto/numero da chave, como o Top76 manda).
+function CU2.parseHerbKey(key)
+    local rawType,yr=string.match(tostring(key),"^(.+)_(%d+)$")
+    if not rawType then return nil end
+    local num=tonumber(rawType)
+    local id=num or CU2.HERB_IDS[rawType] or CU2.HERB_IDS[(rawType:lower():gsub("[%s_%-]",""))] or rawType
+    return id,tonumber(yr) or 0,num or rawType
+end
+function CU2.herbEntries(counts,minYear)
+    local list={}
+    if type(counts)~="table" then return list end
+    for key,count in pairs(counts) do
+        local id,yr,sendType=CU2.parseHerbKey(key)
+        local c=tonumber(count) or 0
+        if id~=nil and c>0 and yr>=(minYear or 0) then
+            list[#list+1]={id=id,year=yr,send=sendType,count=c,key=tostring(key)}
+        end
+    end
+    -- Ano mais baixo primeiro: guarda as ervas raras (para pilula melhor, suba o "ano minimo").
+    table.sort(list,function(a,b)
+        if a.year~=b.year then return a.year<b.year end
+        return a.key<b.key
+    end)
+    return list
+end
+function CU2.herbCountText()
+    local list=CU2.herbEntries(CU2.herbCounts,0)
+    if #list==0 then
+        return next(CU2.herbCounts)==nil and "(o servidor ainda nao mandou)" or ("formato desconhecido: "..CU2.describe(CU2.herbCounts))
+    end
+    local out={}
+    for _,e in ipairs(list) do out[#out+1]=string.format("%s %da x%d",CU2.herbName(e.id),math.floor(e.year),math.floor(e.count)) end
+    return table.concat(out,", ")
+end
+function CU2.setHerbCounts(data,source)
+    CU2.herbCounts=data
+    local text=CU2.herbCountText()
+    if text~=CU2.herbCountsText then
+        CU2.herbCountsText=text
+        CU_LOG.add("ERVAS","inventario",source..": "..text,20,"inventario")
+    end
+end
+-- Monta o pedido do CauldronStartBrew: {{herbType=..., year=...} x3}. Devolve nil e o motivo quando nao da.
+function CU2.buildBrew(counts,recipeIdx,minYear,pillName)
+    minYear=minYear or 0
+    if type(counts)~="table" or next(counts)==nil then
+        return nil,"o inventario de ervas ainda nao chegou do servidor (colete 1 erva ou abra o caldeirao uma vez)"
+    end
+    local entries=CU2.herbEntries(counts,minYear)
+    if recipeIdx==2 then
+        for _,e in ipairs(entries) do
+            if e.count>=3 then
+                return {{herbType=e.send,year=e.year},{herbType=e.send,year=e.year},{herbType=e.send,year=e.year}},
+                    string.format("3x %s %d anos",CU2.herbName(e.id),math.floor(e.year))
+            end
+        end
+        return nil,string.format("nenhuma erva com 3 ou mais (ano >= %d)",math.floor(minYear))
+    end
+    local recipe=Constants.PILL_RECIPES[pillName]
+    if not recipe then return nil,"receita desconhecida: "..tostring(pillName) end
+    local need,order={},{}
+    for _,name in ipairs(recipe) do
+        local id=CU2.HERB_IDS[name]
+        if not id then return nil,"erva sem ID: "..tostring(name) end
+        if not need[id] then
+            need[id]=0
+            order[#order+1]=id
+        end
+        need[id]+=1
+    end
+    local payload,parts={},{}
+    for _,id in ipairs(order) do
+        local want,got=need[id],0
+        for _,e in ipairs(entries) do
+            if e.id==id and got<want then
+                local take=math.min(e.count,want-got)
+                for _=1,take do payload[#payload+1]={herbType=e.send,year=e.year} end
+                parts[#parts+1]=string.format("%dx %s %d anos",math.floor(take),CU2.herbName(id),math.floor(e.year))
+                got+=take
+            end
+        end
+        if got<want then
+            return nil,string.format("falta %s para %s: precisa %d, tem %d com ano >= %d",CU2.herbName(id),tostring(pillName),want,math.floor(got),math.floor(minYear))
+        end
+    end
+    return payload,table.concat(parts,", ")
+end
+function CU2.setCauldronStatus(st)
+    local old=CU2.cauldronStatus
+    if st==old then return end
+    CU2.cauldronStatus=st
+    CU_LOG.add("CALDEIRAO","status",tostring(old).." -> "..st,0)
+    CU_LOG.count("Caldeirao: status "..st)
+    if old=="brewing" then CU2.stats.brewsDone+=1 end
+end
+
+-- Ano da erva: atributo HerbYear/Year (Top76) ou o numero antes de "Year"/"Yr" no nome ou no texto do prompt.
+function CU2.herbYear(part,prompt)
+    local y=part:GetAttribute("HerbYear") or part:GetAttribute("Year")
+    if type(y)=="number" then return y end
+    local texts={part.Name,part.Parent and part.Parent.Name or "",prompt and prompt.ObjectText or "",prompt and prompt.ActionText or ""}
+    for _,t in ipairs(texts) do
+        local n=tostring(t):match("(%d+)%s*%-?%s*[Yy]")
+        if n then return tonumber(n) end
+    end
+    return 1
+end
+function CU2.herbIsSelected(part,prompt,herbName)
+    local want=tostring(herbName or ""):lower()
+    if want=="" then return false end
+    local ht=part:GetAttribute("HerbType")
+    if ht~=nil and (ht==CU2.HERB_IDS[herbName] or tostring(ht):lower()==want) then return true end
+    for _,t in ipairs({part.Name,part.Parent and part.Parent.Name or "",prompt and prompt.ObjectText or ""}) do
+        if tostring(t):lower():find(want,1,true) then return true end
+    end
+    return false
+end
+
+-- Luta: "sem dano" quando o HP do alvo nao cai por NO_DAMAGE_SECS (cura do monstro nao engana: compara com a leitura anterior).
+function CU2.fightCheck(f,hp,now)
+    if hp<(f.prevHp or hp)-0.01 then
+        if not f.firstDropAt then
+            f.firstDropAt=now
+            f.hitsAtFirstDrop=f.hits or 0
+        end
+        f.lastDropAt=now
+    end
+    f.prevHp=hp
+    if hp<(f.minHp or hp) then f.minHp=hp end
+    if now-(f.lastDropAt or now)>=CU2.NO_DAMAGE_SECS then return "sem dano" end
+    return nil
+end
+
+function CU2.onMapEvent(action,payload)
+    CU_LOG.add("SECT","MapEvent",tostring(action)..": "..CU2.describe(payload),0)
+    if action=="start" and type(payload)=="table" and CU2.isV3(payload.centre) then
+        CU2.event={name=tostring(payload.name or "Sect Clash"),centre=payload.centre,
+            endsAt=tonumber(payload.endsAt) or (Workspace:GetServerTimeNow()+300),
+            teams=type(payload.teams)=="table" and payload.teams or {},
+            order=type(payload.order)=="table" and payload.order or {"Alliance","Cult"},
+            side=type(payload.side)=="string" and payload.side or nil,startedAt=os.clock(),hits=0}
+        CU2.stats.clashEvents+=1
+        CU2.events[#CU2.events+1]=string.format("%s comecou: %s, centro %s, lado %s, times %s",os.date("%H:%M:%S"),
+            CU2.event.name,CU2.describe(payload.centre),tostring(CU2.event.side),CU2.describe(CU2.event.teams))
+    elseif action=="side" and type(payload)=="string" and CU2.event then
+        CU2.event.side=payload
+        CU2.events[#CU2.events+1]=os.date("%H:%M:%S").." entrou no lado "..payload
+    elseif action=="end" or action=="cancel" then
+        if CU2.event then
+            CU2.events[#CU2.events+1]=string.format("%s %s: durou %s, %d golpes enviados",os.date("%H:%M:%S"),tostring(action),
+                CU_LOG.secs(os.clock()-CU2.event.startedAt),CU2.event.hits)
+        end
+        CU2.event=nil
+    end
+    if #CU2.events>40 then table.remove(CU2.events,1) end
+end
+function CU2.enemyFighter(ev)
+    local order=ev.order or {}
+    local enemySide=(ev.side==order[1]) and order[2] or order[1]
+    local info=ev.teams and ev.teams[enemySide]
+    return type(info)=="table" and info.fighter or nil,enemySide
+end
+
+function CU2.onDeath(char)
+    local root=char and char:FindFirstChild("HumanoidRootPart")
+    local f=CU2.mob
+    local line=string.format("%s morreu | ligado: %s | alvo: %s | Sect Clash: %s | posicao %s",
+        os.date("%H:%M:%S"),CU_LOG.activeList(),
+        f and string.format("%s HP %d/%d (%d golpes)",f.name,math.floor(f.prevHp or 0),math.floor(f.maxHp or 0),f.hits or 0) or "nenhum",
+        CU2.event and CU2.event.name or "nao",root and CU2.describe(root.Position) or "?")
+    CU2.deaths[#CU2.deaths+1]=line
+    if #CU2.deaths>20 then table.remove(CU2.deaths,1) end
+    CU_LOG.count("Mortes: personagem morreu")
+    CU_LOG.add("MORTE","personagem",line,0)
+end
+
+-- Plataforma invisivel embaixo do personagem (Top76): segura o personagem nas posicoes embaixo da terra.
+function CU2.getPlatform()
+    local p=CU2.platform
+    if p and p.Parent then return p end
+    p=Instance.new("Part")
+    p.Name="CU2Plataforma"
+    p.Size=Vector3.new(8,1,8)
+    p.Anchored=true
+    p.Transparency=1
+    p.CanCollide=true
+    p.CFrame=CFrame.new(0,9999,0)
+    p.Parent=Workspace
+    CU2.platform=p
+    return p
+end
+function CU2.parkPlatformIfIdle()
+    if CU2.platform and not CU2.mobBusy and not CU2.on("herb2") and not (CU2.event and CU2.on("sectClash")) then
+        CU2.platform.CFrame=CFrame.new(0,9999,0)
+    end
+end
+-- Teleporte do Top76: ate 38 studs vai direto; mais longe, passos de 36 studs a cada 0,1s (~360 studs/s), abaixo dos
+-- limites do anti-cheat do jogo citados por ele (MovementGuardRules: SLACK 40, MAX_FLAT_SPEED 400).
+-- Correcao: carrega a area com LocalPlayer:RequestStreamAroundAsync (ele chamava no workspace, que nao tem esse metodo).
+function CU2.safeTeleport(hrp,targetCFrame,lookPart,abortFn,platformDrop)
+    if not hrp or not targetCFrame then return false end
+    local targetPos=targetCFrame.Position
+    if targetPos.Magnitude<5 then return false end
+    local platform=CU2.getPlatform()
+    local drop=platformDrop or -1
+    local startPos=hrp.Position
+    local flat=Vector2.new(targetPos.X-startPos.X,targetPos.Z-startPos.Z).Magnitude
+    if flat>300 then
+        local ok,err=pcall(function() LocalPlayer:RequestStreamAroundAsync(targetPos,2) end)
+        if not ok then CU_LOG.error("Carregar area (RequestStreamAroundAsync)",err) end
+    end
+    local function apply(cf)
+        platform.CFrame=cf*CFrame.new(0,drop,0)
+        hrp.AssemblyLinearVelocity=Vector3.zero
+        hrp.AssemblyAngularVelocity=Vector3.zero
+        if lookPart and lookPart.Parent then
+            hrp.CFrame=CFrame.new(cf.Position,lookPart.Position+Vector3.new(0.01,0,0.01))
+        else
+            hrp.CFrame=cf
+        end
+    end
+    if flat<=38 then
+        apply(targetCFrame)
+        return true
+    end
+    local steps=math.ceil(flat/36)
+    local rot=targetCFrame-targetCFrame.Position
+    CU_LOG.count("Movimento: viagens em passos de 36 studs")
+    CU_LOG.add("MOVIMENTO","passos",string.format("%.0f studs em %d passos (~%.1fs)",flat,steps,steps*0.1),5)
+    for i=1,steps do
+        if not hrp.Parent then return false end
+        if abortFn and abortFn() then return false end
+        apply(CFrame.new(startPos:Lerp(targetPos,i/steps))*rot)
+        task.wait(0.10)
+    end
+    return true
+end
+
+-- Monstros: modelos com Humanoid dentro dos containers do Top76 (ate 3 niveis de pastas).
+function CU2.collectMobModels(obj,depth,out)
+    if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") then
+        out[#out+1]=obj
+        return
+    end
+    if depth>=3 then return end
+    for _,ch in ipairs(obj:GetChildren()) do
+        if ch:IsA("Model") or ch:IsA("Folder") then CU2.collectMobModels(ch,depth+1,out) end
+    end
+end
+function CU2.scanMobs(onlySelected)
+    local list,names,seen,ctext={},{},{},{}
+    local now=os.clock()
+    for _,cname in ipairs(CU2.MOB_CONTAINERS) do
+        local c=Workspace:FindFirstChild(cname)
+        local alive=0
+        if c then
+            local models={}
+            CU2.collectMobModels(c,0,models)
+            for _,model in ipairs(models) do
+                if model~=LocalPlayer.Character and not Players:GetPlayerFromCharacter(model) then
+                    local hum=model:FindFirstChildOfClass("Humanoid")
+                    local hrp=model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChild("Head")
+                    if hum and hum.Health>0 and hrp and hrp:IsA("BasePart") then
+                        alive+=1
+                        if not seen[model.Name] then
+                            seen[model.Name]=true
+                            names[#names+1]=model.Name
+                        end
+                        local sel=CU2.s.selectedMobs[model.Name]
+                        if sel==nil then
+                            sel=true
+                            CU2.s.selectedMobs[model.Name]=true
+                        end
+                        if (not onlySelected or sel==true) and not ((CU2.blacklist[model] or 0)>now) then
+                            list[#list+1]={model=model,hrp=hrp,hum=hum}
+                        end
+                    end
+                end
+            end
+        end
+        ctext[#ctext+1]=cname.."="..(c and (alive.." vivos") or "NAO existe")
+    end
+    CU2.containerText=table.concat(ctext,", ")
+    table.sort(names)
+    CU2.mobNames=names
+    return list
+end
+-- Quando nao acha monstro: pastas do mapa que tem Humanoid (para o proximo TXT dizer onde os monstros estao).
+function CU2.findMobFolders()
+    local out={}
+    for _,child in ipairs(Workspace:GetChildren()) do
+        if (child:IsA("Folder") or child:IsA("Model")) and not Players:GetPlayerFromCharacter(child) then
+            local n=0
+            for _,d in ipairs(child:GetDescendants()) do
+                if d:IsA("Humanoid") then n+=1 end
+            end
+            if n>0 then out[#out+1]=child.Name.."("..n..")" end
+        end
+    end
+    return #out>0 and table.concat(out,", ") or "nenhuma"
+end
+function CU2.validMob(m)
+    return m and m.model and m.model.Parent and CU2.s.selectedMobs[m.model.Name]==true
+        and m.hum and m.hum.Parent and m.hum.Health>0 and m.hrp and m.hrp.Parent
+end
+function CU2.expand(hrp)
+    if not CU2.expanded[hrp] then CU2.expanded[hrp]=hrp.Size end
+    CU_LOG.try("Combate: aumentar hitbox",function()
+        hrp.Size=Vector3.new(25,25,25)
+        hrp.CanCollide=false
+    end)
+end
+function CU2.resetHitboxes()
+    for part,size in pairs(CU2.expanded) do
+        if part and part.Parent then
+            CU_LOG.try("Combate: voltar hitbox",function()
+                part.Size=size
+                part.Transparency=1
+            end)
+        end
+    end
+    CU2.expanded={}
+end
+function CU2.touch(a,b)
+    if not firetouchinterest then
+        CU_LOG.add("AVISO","CU2","o executor nao tem firetouchinterest: orbs e espiritos so pelo teleporte e pelo remote",300)
+        return false
+    end
+    local ok,err=pcall(function()
+        firetouchinterest(a,b,0)
+        firetouchinterest(a,b,1)
+    end)
+    if not ok then CU_LOG.error("firetouchinterest",err) end
+    return ok
+end
+function CU2.setLabel(key,text)
+    local l=CU2.ui.labels[key]
+    if l and l.Parent and l.Text~=text then l.Text=text end
+end
+
+function CU2.statusLine()
+    local c=CU_LOG.counts
+    return string.format("CU2: lutas %d, mortos %d, sem dano %d | CombatHit tira HP: %s | minijogos pulados %d | Brew %d | ervas mapa todo %d",
+        c["Combate: lutas"] or 0,c["Combate: monstro morto"] or 0,c["Combate: sem dano (pulado 30s)"] or 0,
+        CU2.stats.hitAccepted and "sim" or "?",CU2.stats.trialSkips,CU2.stats.brewsStarted,CU2.stats.herbsOk+CU2.stats.herbsMaybe)
+end
+function CU2.sections()
+    local st=CU2.stats
+    local c=CU_LOG.counts
+    local function n(k) return c[k] or 0 end
+    local act=CU2.activeNames()
+    local fights=n("Combate: lutas")
+    local out={"[CU2: FUNCOES DO TOP76 PELO SERVIDOR (sem tecla)]",
+        "Ligadas: "..(#act>0 and table.concat(act,", ") or "nenhuma").." | posicao do farm: "..CU2.offsetText()
+            .." | turbo="..tostring(CU2.s.turbo).." grupo="..tostring(CU2.s.aoe),
+        string.format("Combate: %d lutas, %d mortos, %d sem dano (pulados 30s), %d com o personagem morto | CombatHit tira HP? %s",
+            fights,n("Combate: monstro morto"),n("Combate: sem dano (pulado 30s)"),n("Combate: personagem morreu na luta"),
+            st.hitAccepted and ("SIM ("..st.hitAccepted..")") or (fights>0 and "NAO confirmado" or "sem lutas ainda")),
+        "Containers de monstros: "..(CU2.containerText or "ainda nao escaneado"),
+        string.format("Breakthrough pelo servidor: %d minijogos com (true) enviado; fechou %d, continuou aberto %d",st.trialSkips,st.trialClosed,st.trialOpen),
+        string.format("Soul: %d viagens, %d catch enviados (%d espiritos sumiram depois), %d ervas do Spirit World",st.soulTrips,st.soulCatches,st.soulGone,st.soulHerbs),
+        string.format("Pilulas pelo servidor: %d Brew enviados, %d terminaram | caldeirao agora: %s | ultimo: %s",st.brewsStarted,st.brewsDone,tostring(CU2.cauldronStatus),CU2.lastBrewNote),
+        "Ervas no inventario (servidor): "..CU2.herbCountText(),
+        string.format("Ervas mapa todo: %d com confirmacao do servidor, %d o prompt sumiu, %d nao coletou",st.herbsOk,st.herbsMaybe,st.herbsFail),
+        string.format("Sect Clash: %d eventos, %d golpes | Anti-AFK: %d",st.clashEvents,st.clashHits,st.afk),
+        "Remotes do Top76 neste jogo: "..CU2.remoteCheck()}
+    if CU2.mobFolders then out[#out+1]="Pastas do mapa com Humanoid (quando nao achou monstro): "..CU2.mobFolders end
+    local text=table.concat(out,"\n").."\n\n"
+    if #CU2.fights>0 then text=text.."[LUTAS: ultimas "..#CU2.fights.."]\n"..table.concat(CU2.fights,"\n").."\n\n" end
+    if #CU2.deaths>0 then text=text.."[MORTES: "..#CU2.deaths.."]\n"..table.concat(CU2.deaths,"\n").."\n\n" end
+    if #CU2.events>0 then text=text.."[SECT CLASH]\n"..table.concat(CU2.events,"\n").."\n\n" end
+    return text
+end
+function CU2.safeSections()
+    local ok,res=xpcall(CU2.sections,CU_LOG.onError)
+    if ok then return res end
+    CU_LOG.error("CU2 resumo do TXT",res)
+    return "[CU2: erro ao montar o resumo, veja ERROS]\n\n"
+end
+function CU2.stopAll()
+    if CU2.stopped then return end
+    CU2.stopped=true
+    CU2.mobBusy=false
+    for _,c in ipairs(CU2.conns) do c:Disconnect() end
+    CU2.conns={}
+    CU2.resetHitboxes()
+    if CU2.platform then
+        CU2.platform:Destroy()
+        CU2.platform=nil
+    end
+    CU_LOG.add("INFO","CU2","janela fechada: todas as funcoes do CU2 pararam",0)
+end
+-- Auto Kill (aba Auto): golpe e skill pelo servidor alem do clique/tecla VIM (que nao funcionam no celular).
+function CU2.killHit(char)
+    if not char then return end
+    CU2.fire("CombatHit",char,1)
+    CU_LOG.count("Kill: CombatHit pelo servidor")
+    local hum=char:FindFirstChildOfClass("Humanoid")
+    if hum then CU_LOG.add("KILL","alvo",string.format("%s HP %d/%d",char.Name,math.floor(hum.Health),math.floor(hum.MaxHealth)),10,"kill-hp") end
+end
+function CU2.killSkill(keyName,char)
+    local _,hrp=CU2.char()
+    local root=char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp or not root then return end
+    local d=root.Position-hrp.Position
+    CU2.fire("UseSkill",keyName,d.Magnitude>0.1 and d.Unit or hrp.CFrame.LookVector,root.Position)
+    CU_LOG.count("Kill: UseSkill pelo servidor "..keyName)
+end
 
 -------------------------------------------------------------------------
 -- UI & INPUT HELPER FUNCTIONS
@@ -756,7 +1385,7 @@ do
     titleText.Size = UDim2.new(1, -100, 1, 0)
     titleText.Position = UDim2.new(0, 15, 0, 0)
     titleText.BackgroundTransparency = 1
-    titleText.Text = "Cultivation Hub (Auto-Save Config) | Log CU1"
+    titleText.Text = "Cultivation Hub | CU2 (Top76 + log)"
     titleText.TextColor3 = Color3.fromRGB(220, 220, 220)
     titleText.TextSize = 14
     titleText.Font = Enum.Font.GothamBold
@@ -842,18 +1471,30 @@ do
     end
 
     local autoTabBtn = makeTabBtn("Auto", 10, true)
-    local locationTabBtn = makeTabBtn("Location", 48, false)
-    local settingTabBtn = makeTabBtn("Setting", 86, false)
-    local logsTabBtn = makeTabBtn("Logs", 124, false)
+    local locationTabBtn = makeTabBtn("Location", 124, false)
+    local settingTabBtn = makeTabBtn("Setting", 162, false)
+    local logsTabBtn = makeTabBtn("Logs", 200, false)
     local logsPage = Instance.new("ScrollingFrame")
     logsPage.Size = UDim2.new(1, 0, 1, 0)
     logsPage.BackgroundTransparency = 1
-    logsPage.CanvasSize = UDim2.new(0, 0, 0, 330)
+    logsPage.CanvasSize = UDim2.new(0, 0, 0, 400)
     logsPage.ScrollBarThickness = 5
     logsPage.ScrollingDirection = Enum.ScrollingDirection.Y
     logsPage.Visible = false
     logsPage.Parent = contentArea
     UI.LogsPage = logsPage
+    -- CU2: abas Combate e Extra (o conteudo e montado no fim do arquivo).
+    for cuIndex, cuName in ipairs({"Combate", "Extra"}) do
+        local cuPage = Instance.new("ScrollingFrame")
+        cuPage.Size = UDim2.new(1, 0, 1, 0)
+        cuPage.BackgroundTransparency = 1
+        cuPage.CanvasSize = UDim2.new(0, 0, 0, 400)
+        cuPage.ScrollBarThickness = 5
+        cuPage.ScrollingDirection = Enum.ScrollingDirection.Y
+        cuPage.Visible = false
+        cuPage.Parent = contentArea
+        CU2.tabs[cuName] = {page = cuPage, btn = makeTabBtn(cuName, 10 + cuIndex * 38, false)}
+    end
 
     local function switchTab(tabName)
         autoPage.Visible = (tabName == "Auto")
@@ -872,12 +1513,20 @@ do
         logsPage.Visible = (tabName == "Logs")
         logsTabBtn.BackgroundColor3 = (tabName == "Logs") and Color3.fromRGB(45, 32, 58) or Color3.fromRGB(28, 22, 34)
         logsTabBtn.TextColor3 = (tabName == "Logs") and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(160, 160, 160)
+        for cuName, cuTab in pairs(CU2.tabs) do
+            cuTab.page.Visible = (tabName == cuName)
+            cuTab.btn.BackgroundColor3 = (tabName == cuName) and Color3.fromRGB(45, 32, 58) or Color3.fromRGB(28, 22, 34)
+            cuTab.btn.TextColor3 = (tabName == cuName) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(160, 160, 160)
+        end
     end
 
     autoTabBtn.Activated:Connect(function() switchTab("Auto") end)
     locationTabBtn.Activated:Connect(function() switchTab("Location") end)
     settingTabBtn.Activated:Connect(function() switchTab("Setting") end)
     logsTabBtn.Activated:Connect(function() switchTab("Logs") end)
+    for cuName, cuTab in pairs(CU2.tabs) do
+        cuTab.btn.Activated:Connect(function() switchTab(cuName) end)
+    end
 
     floatingBtn.Activated:Connect(function()
         State.uiVisible = not State.uiVisible
@@ -892,6 +1541,7 @@ do
         State.autoRealmActive = false
         State.autoBodyActive = false
         State.autoKillActive = false
+        CU2.stopAll()
         screenGui:Destroy()
     end)
 
@@ -990,8 +1640,9 @@ do
         end)
     end
 
-    createToggleRow(page, 70, "autofarm herb", State.autoFarmActive, nil, function(val)
+    UI.HerbRow, UI.SetHerbSwitch = createToggleRow(page, 70, "autofarm herb", State.autoFarmActive, nil, function(val)
         State.autoFarmActive = val
+        if val then CU2.exclusive("herb") end
         Config.autoFarmActive = val
         if not val and State.activeFarmTween then
             pcall(function() State.activeFarmTween:Cancel() end)
@@ -1146,8 +1797,9 @@ do
         end)
     end
 
-    createToggleRow(page, 250, "Autocreate pills (Anywhere)", State.autoPillActive, nil, function(val)
+    UI.PillRow, UI.SetPillSwitch = createToggleRow(page, 250, "Autocreate pills (Anywhere)", State.autoPillActive, nil, function(val)
         State.autoPillActive = val
+        if val then CU2.exclusive("pill") end
         Config.autoPillActive = val
         saveConfig()
     end)
@@ -1647,7 +2299,7 @@ do
     end)
 
     local summary = Instance.new("TextLabel")
-    summary.Size = UDim2.new(0.96, 0, 0, 130)
+    summary.Size = UDim2.new(0.96, 0, 0, 190)
     summary.Position = UDim2.new(0, 0, 0, 190)
     summary.BackgroundTransparency = 1
     summary.TextWrapped = true
@@ -1668,6 +2320,7 @@ do
                     #CU_LOG.errorOrder, n("Cliques na tela: getconnections"), n("Cliques na tela: firesignal"),
                     n("Cliques na tela: mouse VIM"), n("Cliques na tela: nenhum metodo (botao invisivel, menu aberto ou caixa de texto)"),
                     n("Teclas simuladas: ERRO"), #CU_LOG.remoteOrder, CU_LOG.activeList(), #CU_LOG.entries)
+                summary.Text = summary.Text .. "\n" .. CU2.statusLine()
             end
             task.wait(2)
         end
@@ -1949,7 +2602,9 @@ do
     -- 3. Loop Responsif (Mengecek setiap 0.15 detik, langsung aktif begitu karakter berhenti)
     CU_LOG.spawnLoop("Realm/Body", function()
         while true do
-            if (State.autoRealmActive or State.autoBodyActive) and not isUserTypingOrInMenu() and not State.isTeleportingZone and not State.autoFarmActive and not State.autoKillActive then
+            local cu2Busy = (State.autoRealmActive or State.autoBodyActive) and CU2.busy()
+            if cu2Busy then CU_LOG.count("Realm/Body: pausado (" .. cu2Busy .. ")") end
+            if (State.autoRealmActive or State.autoBodyActive) and not isUserTypingOrInMenu() and not State.isTeleportingZone and not State.autoFarmActive and not State.autoKillActive and not cu2Busy then
                 local char = LocalPlayer.Character
                 local hum = char and char:FindFirstChildWhichIsA("Humanoid")
                 local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -2127,10 +2782,10 @@ CU_LOG.spawnLoop("Ervas", function()
         tween:Play()
         local completed = false
         local conn = tween.Completed:Connect(function() completed = true end)
-        while not completed and State.autoFarmActive and not State.isTeleportingZone do
+        while not completed and State.autoFarmActive and not State.isTeleportingZone and not CU2.mobBusy and not (CU2.event and CU2.on("sectClash")) do
             task.wait(0.08)
         end
-        if not State.autoFarmActive or State.isTeleportingZone then
+        if not completed then
             pcall(function() tween:Cancel() end)
         end
         if conn then conn:Disconnect() end
@@ -2140,7 +2795,7 @@ CU_LOG.spawnLoop("Ervas", function()
     end
 
     while true do
-        if State.autoFarmActive and not State.isTeleportingZone then
+        if State.autoFarmActive and not State.isTeleportingZone and not CU2.herbBlocked() then
             local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
             local root = char:FindFirstChild("HumanoidRootPart")
             if root then
@@ -2152,7 +2807,7 @@ CU_LOG.spawnLoop("Ervas", function()
                         flyToTarget(root, targetData.Part)
                         CU_LOG.count("Ervas: voos")
                         CU_LOG.add("ERVA", "voo", string.format("%.1fs ate %s; ficou a %.0f studs", os.clock() - cuFly, tostring(targetData.Object.Name), (root.Position - targetData.Part.Position).Magnitude), 2)
-                        if State.autoFarmActive and not State.isTeleportingZone and targetData.Prompt and targetData.Prompt.Enabled then
+                        if State.autoFarmActive and not State.isTeleportingZone and not CU2.mobBusy and targetData.Prompt and targetData.Prompt.Enabled then
                             if fireproximityprompt then
                                 CU_LOG.count("Ervas: coleta via fireproximityprompt")
                                 fireproximityprompt(targetData.Prompt)
@@ -2977,6 +3632,7 @@ do
                             end)
                             CU_LOG.count(okMouse and "Kill: clique mouse VIM em (0,0)" or "Kill: clique mouse VIM ERRO")
                             if not okMouse then CU_LOG.error("Kill mouse VIM", errMouse) end
+                            CU2.killHit(targetPlr.Character)
                         end
 
                         if State.autoSkillKillActive and (tick() - State.lastSkillCycleTime >= 0.35) then
@@ -2989,6 +3645,7 @@ do
                                 VirtualInputManager:SendKeyEvent(false, keyToPress, false, game)
                             end)
                             CU_LOG.key("skill " .. keyToPress.Name, okSkill, errSkill)
+                            CU2.killSkill(keyToPress.Name, targetPlr.Character)
                         end
                     end
                 end
@@ -3037,4 +3694,1224 @@ do
             task.wait(30)
         end
     end)
+end
+
+
+-------------------------------------------------------------------------
+-- CU2: ABAS, OUVINTES E LOOPS (FUNCOES DO TOP76 + MELHORIAS)
+-- Cada loop so roda com a sua chave ligada, para sozinho ao desligar ou ao fechar a janela (X), e conta/registra
+-- no TXT o que mandou e o que o servidor respondeu.
+-------------------------------------------------------------------------
+
+function CU2.trialVisible()
+    local pg=LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return false end
+    for _,obj in ipairs(pg:GetDescendants()) do
+        if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and isActuallyVisible(obj) then
+            local t=trimText(obj.Text)
+            if t:find("breakthrough trial",1,true) or t:find("ring turns gold",1,true) then return true end
+        end
+    end
+    return false
+end
+
+-- ===== COMBATE: FARM DE MONSTROS (Top76) =====
+function CU2.mobPauseReason()
+    if CU2.event and CU2.on("sectClash") then return "Sect Clash" end
+    if State.autoKillActive then return "Auto Kill ligado" end
+    if State.isTeleportingZone then return "teleporte de zona" end
+    return nil
+end
+function CU2.noMobsFound()
+    CU2.setLabel("target","Nenhum monstro marcado vivo nos acampamentos")
+    CU_LOG.count("Combate: nenhum monstro marcado vivo")
+    local now=os.clock()
+    if not CU2.mobFoldersAt or now-CU2.mobFoldersAt>=60 then
+        CU2.mobFoldersAt=now
+        local ok,res=pcall(CU2.findMobFolders)
+        CU2.mobFolders=ok and res or ("erro: "..tostring(res))
+        CU_LOG.add("COMBATE","nenhum monstro",string.format("nenhum monstro marcado vivo. Containers: %s | pastas do mapa com Humanoid: %s",
+            tostring(CU2.containerText),CU2.mobFolders),0)
+    end
+end
+function CU2.swing(char,hum)
+    local backpack=LocalPlayer:FindFirstChildOfClass("Backpack")
+    local tool=char:FindFirstChildOfClass("Tool") or (backpack and backpack:FindFirstChildOfClass("Tool"))
+    if tool and tool.Parent~=char then
+        CU_LOG.count("Combate: equipou "..tool.Name)
+        hum:EquipTool(tool)
+    end
+    if tool then
+        local okT,errT=pcall(function() tool:Activate() end)
+        if not okT then CU_LOG.error("Combate: tool:Activate",errT) end
+    end
+    local okV,errV=pcall(function()
+        local vu=game:GetService("VirtualUser")
+        vu:CaptureController()
+        vu:ClickButton1(Vector2.new(0,0))
+    end)
+    if not okV then
+        CU_LOG.count("Combate: clique VirtualUser ERRO")
+        CU_LOG.error("Combate: clique VirtualUser",errV)
+    end
+    return tool
+end
+function CU2.groupAround(center)
+    local group={}
+    for _,m in ipairs(CU2.scanMobs(true)) do
+        if (m.hrp.Position-center).Magnitude<=38 then
+            group[#group+1]=m
+            if CU2.s.aoe then CU2.expand(m.hrp) end
+        end
+    end
+    return group
+end
+function CU2.endFight(f,result,anchor)
+    local now=os.clock()
+    local endHp=(anchor.hum and anchor.hum.Parent) and anchor.hum.Health or 0
+    local line=string.format("%s %s: HP %d->%d de %d em %.1fs | %d golpes (+%d em grupo) | posicao %s | arma %s | distancia inicial %.0f | menor vida do jogador %d%% | fim: %s",
+        f.startStamp,f.name,math.floor(f.startHp),math.floor(endHp),math.floor(f.maxHp),now-f.startAt,f.hits,f.aoe,CU2.offsetText(),
+        f.tool and f.tool.Name or "nenhuma",f.dist or 0,math.floor(f.playerMin*100),result)
+    CU2.fights[#CU2.fights+1]=line
+    if #CU2.fights>25 then table.remove(CU2.fights,1) end
+    CU_LOG.add("LUTA",f.name,line,0)
+    CU_LOG.count("Combate: lutas")
+    if result=="morto" or result:find("sumiu",1,true) then CU_LOG.count("Combate: monstro morto") end
+    if result=="personagem morreu" then CU_LOG.count("Combate: personagem morreu na luta") end
+    if result=="sem dano" then
+        CU_LOG.count("Combate: sem dano (pulado 30s)")
+        local _,hrp=CU2.char()
+        CU_LOG.add("COMBATE","sem dano",string.format("%s nao perdeu HP em %ds com %d golpes: distancia agora %.0f studs, posicao %s, arma %s. Se repetir em todos os monstros, o servidor recusa o CombatHit ou a posicao esta longe: troque a posicao.",
+            f.name,CU2.NO_DAMAGE_SECS,f.hits,(hrp and anchor.hrp.Parent) and (hrp.Position-anchor.hrp.Position).Magnitude or -1,CU2.offsetText(),
+            f.tool and f.tool.Name or "nenhuma"),0)
+    end
+    if f.firstDropAt and not CU2.stats.hitAccepted then
+        CU2.stats.hitAccepted=string.format("%s em %s, %d golpes ate o primeiro dano",os.date("%H:%M:%S"),f.name,f.hitsAtFirstDrop or 0)
+        CU_LOG.add("COMBATE","CombatHit","ACEITO: o HP do monstro caiu ("..CU2.stats.hitAccepted..")",0)
+    end
+    CU2.mob=nil
+    CU2.targetPart=nil
+end
+function CU2.fight(anchor)
+    local hp0=anchor.hum.Health
+    local f={name=anchor.model.Name,startHp=hp0,prevHp=hp0,minHp=hp0,maxHp=anchor.hum.MaxHealth,hits=0,aoe=0,playerMin=1,
+        startAt=os.clock(),startStamp=os.date("%H:%M:%S")}
+    CU2.mob=f
+    CU2.cancelHerbTween()
+    local _,hrp0=CU2.char()
+    if hrp0 then
+        f.dist=(anchor.hrp.Position-hrp0.Position).Magnitude
+        CU2.safeTeleport(hrp0,anchor.hrp.CFrame*CFrame.new(CU2.offsetVec()),anchor.hrp,function() return not CU2.on("mobFarm") end)
+    end
+    f.lastDropAt=os.clock()
+    local cluster,nextCluster,cursor,nextTool,nextLabel={},0,1,0,0
+    local result="?"
+    while true do
+        if not CU2.on("mobFarm") then result="farm desligado" break end
+        local pause=CU2.mobPauseReason()
+        if pause then result="pausado: "..pause break end
+        local char,hrp,hum=CU2.char()
+        if not hrp or hum.Health<=0 then result="personagem morreu" break end
+        if not anchor.model.Parent then result="monstro sumiu (morreu ou despawn)" break end
+        if anchor.hum.Health<=0 then result="morto" break end
+        if CU2.s.selectedMobs[anchor.model.Name]~=true then result="desmarcado" break end
+        local now=os.clock()
+        f.playerMin=math.min(f.playerMin,hum.Health/math.max(hum.MaxHealth,1))
+        if CU2.fightCheck(f,anchor.hum.Health,now) then
+            result="sem dano"
+            CU2.blacklist[anchor.model]=now+30
+            break
+        end
+        if now>=nextCluster then
+            cluster=CU2.groupAround(anchor.hrp.Position)
+            nextCluster=now+0.4
+        end
+        local target=anchor
+        if CU2.s.aoe and #cluster>1 then
+            if cursor>#cluster then cursor=1 end
+            target=cluster[cursor]
+            cursor+=1
+            if not CU2.validMob(target) then target=anchor end
+        elseif not CU2.s.aoe then
+            CU2.resetHitboxes()
+        end
+        CU2.targetPart=target.hrp
+        if now>=nextLabel then
+            nextLabel=now+0.15
+            CU2.setLabel("target",string.format("Alvo: %s %d/%d%s",target.model.Name,math.floor(target.hum.Health),math.floor(target.hum.MaxHealth),
+                CU2.s.aoe and (" | grupo "..#cluster) or ""))
+        end
+        CU2.safeTeleport(hrp,target.hrp.CFrame*CFrame.new(CU2.offsetVec()),target.hrp)
+        if CU2.validMob(target) then
+            if CU2.fire("CombatHit",target.model,1) then f.hits+=1 end
+            if CU2.s.turbo and CU2.fire("CombatHit",target.model,1) then f.hits+=1 end
+            if CU2.s.aoe then
+                for _,o in ipairs(cluster) do
+                    if o.model~=target.model and CU2.validMob(o) and CU2.fire("CombatHit",o.model,1) then f.aoe+=1 end
+                end
+            end
+        end
+        now=os.clock()
+        if now>=nextTool then
+            nextTool=now+(CU2.s.turbo and 0.10 or 0.20)
+            f.tool=CU2.swing(char,hum)
+        end
+        task.wait(CU2.s.turbo and 0.06 or 0.12)
+    end
+    CU2.endFight(f,result,anchor)
+end
+function CU2.mobFarmLoop()
+    CU_LOG.add("COMBATE","farm",string.format("ligado: posicao %s, turbo=%s, grupo=%s",CU2.offsetText(),tostring(CU2.s.turbo),tostring(CU2.s.aoe)),0)
+    while CU2.on("mobFarm") do
+        local pause=CU2.mobPauseReason()
+        if pause then
+            CU2.mobBusy=false
+            CU2.resetHitboxes()
+            CU_LOG.count("Combate: pausado ("..pause..")")
+            CU2.setLabel("target","Farm pausado: "..pause)
+            task.wait(0.5)
+        else
+            local _,hrp,hum=CU2.char()
+            if not hrp or hum.Health<=0 then
+                CU2.mobBusy=false
+                CU2.setLabel("target","Esperando o personagem renascer...")
+                task.wait(0.5)
+            else
+                local mobs=CU2.scanMobs(true)
+                if #mobs==0 then
+                    CU2.mobBusy=false
+                    CU2.resetHitboxes()
+                    CU2.noMobsFound()
+                    CU2.parkPlatformIfIdle()
+                    task.wait(0.8)
+                else
+                    table.sort(mobs,function(a,b)
+                        return (a.hrp.Position-hrp.Position).Magnitude<(b.hrp.Position-hrp.Position).Magnitude
+                    end)
+                    CU2.mobBusy=true
+                    CU2.fight(mobs[1])
+                end
+            end
+        end
+    end
+    CU2.mobBusy=false
+    CU2.mob=nil
+    CU2.resetHitboxes()
+    CU2.parkPlatformIfIdle()
+    CU2.setLabel("target","Alvo: farm desligado")
+    CU_LOG.add("COMBATE","farm","desligado",0)
+end
+
+-- ===== SKILLS PELO SERVIDOR (Top76: UseSkill(tecla, direcao, posicao)); mira no alvo do farm/Sect Clash =====
+function CU2.aim(hrp)
+    local target=CU2.targetPart
+    if target and target.Parent then
+        local d=target.Position-hrp.Position
+        if d.Magnitude>0.1 then return d.Unit,target.Position end
+    end
+    local look=hrp.CFrame.LookVector
+    return look,hrp.Position+look*15
+end
+function CU2.skillsLoop()
+    while CU2.on("skills") do
+        local _,hrp,hum=CU2.char()
+        if hrp and hum.Health>0 then
+            for _,key in ipairs(CU2.SKILL_KEYS) do
+                if not CU2.on("skills") then break end
+                local look,pos=CU2.aim(hrp)
+                CU2.fire("UseSkill",key,look,pos)
+                CU_LOG.count("Skills servidor: "..key)
+                task.wait(0.15)
+            end
+        end
+        task.wait(0.5)
+    end
+end
+
+-- ===== SECT CLASH (Top76: MapEvent start/side/end) =====
+function CU2.findEventEnemy(ev,enemyName)
+    local cache=CU2.clashCache
+    if cache and cache.name==enemyName and cache.model.Parent and cache.hum.Health>0 then return cache end
+    local now=os.clock()
+    if CU2.clashScanAt and now<CU2.clashScanAt then return nil end
+    CU2.clashScanAt=now+1
+    CU2.clashCache=nil
+    if not enemyName then return nil end
+    local best,bestDist=nil,1e9
+    for _,obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("Model") and obj.Name==enemyName and obj~=LocalPlayer.Character then
+            local hum=obj:FindFirstChildOfClass("Humanoid")
+            local hrp=obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+            if hum and hum.Health>0 and hrp then
+                local d=(hrp.Position-ev.centre).Magnitude
+                if d<=150 and d<bestDist then
+                    bestDist=d
+                    best={model=obj,hrp=hrp,hum=hum,name=enemyName}
+                end
+            end
+        end
+    end
+    CU2.clashCache=best
+    return best
+end
+function CU2.clashLoop()
+    while CU2.on("sectClash") do
+        local ev=CU2.event
+        if ev and Workspace:GetServerTimeNow()>ev.endsAt+10 then
+            CU2.events[#CU2.events+1]=os.date("%H:%M:%S").." acabou pelo horario (o servidor nao mandou 'end')"
+            CU2.event=nil
+            ev=nil
+        end
+        if not ev then
+            CU2.targetPart=nil
+            CU2.setLabel("clash","Sect Clash: esperando o evento comecar (MapEvent)")
+            task.wait(1)
+        else
+            local _,hrp,hum=CU2.char()
+            if hrp and hum.Health>0 then
+                local distC=(hrp.Position-ev.centre).Magnitude
+                if not ev.side or distC>145 then
+                    CU2.setLabel("clash","Sect Clash: indo para "..ev.name)
+                    CU_LOG.add("SECT","entrar",string.format("indo ao centro (%.0f studs), lado=%s",distC,tostring(ev.side)),10)
+                    CU2.safeTeleport(hrp,CFrame.new(ev.centre+Vector3.new(0,3,0)),nil,function() return not CU2.on("sectClash") end)
+                    task.wait(0.3)
+                else
+                    local enemyName,enemySide=CU2.enemyFighter(ev)
+                    local enemy=CU2.findEventEnemy(ev,enemyName)
+                    CU2.setLabel("clash",string.format("Sect Clash: lado %s | inimigo %s",tostring(ev.side),
+                        enemy and string.format("%s %d/%d",enemy.model.Name,math.floor(enemy.hum.Health),math.floor(enemy.hum.MaxHealth)) or "nao achado"))
+                    if enemy then
+                        CU2.targetPart=enemy.hrp
+                        CU2.safeTeleport(hrp,enemy.hrp.CFrame*CFrame.new(CU2.offsetVec()),enemy.hrp)
+                        if CU2.fire("CombatHit",enemy.model,1) then
+                            ev.hits+=1
+                            CU2.stats.clashHits+=1
+                        end
+                        if CU2.s.turbo and CU2.fire("CombatHit",enemy.model,1) then
+                            ev.hits+=1
+                            CU2.stats.clashHits+=1
+                        end
+                        CU_LOG.add("SECT","luta",string.format("%s HP %d/%d, %d golpes no evento",enemy.model.Name,math.floor(enemy.hum.Health),
+                            math.floor(enemy.hum.MaxHealth),ev.hits),10,"sect-luta")
+                    else
+                        CU2.targetPart=nil
+                        CU_LOG.add("SECT","inimigo",string.format("nenhum '%s' (lado %s) vivo a 150 studs do centro; times: %s",tostring(enemyName),
+                            tostring(enemySide),CU2.describe(ev.teams)),15,"sect-sem-inimigo")
+                        CU2.safeTeleport(hrp,CFrame.new(ev.centre+Vector3.new(0,5,0)))
+                    end
+                end
+            end
+            task.wait(0.12)
+        end
+    end
+    CU2.targetPart=nil
+    CU2.setLabel("clash","Sect Clash: desligado")
+end
+
+-- ===== SOUL PROJECTION + ESPIRITOS (Top76) =====
+function CU2.bodyPosition()
+    local bodies=Workspace:FindFirstChild("SoulBodies")
+    local body=bodies and (bodies:FindFirstChild(LocalPlayer.Name) or bodies:FindFirstChild(tostring(LocalPlayer.UserId)))
+    if not body then return nil end
+    if body:IsA("Model") then
+        local pp=body.PrimaryPart or body:FindFirstChildWhichIsA("BasePart")
+        return pp and pp.Position
+    end
+    if body:IsA("BasePart") then return body.Position end
+    return nil
+end
+function CU2.soulLoop()
+    local caught=setmetatable({},{__mode="k"})
+    local sessionStart,tripCatches=0,0
+    while CU2.on("soul") do
+        local char,hrp,hum=CU2.char()
+        local other=(CU2.mobBusy and "farm de monstros") or (CU2.on("herb2") and "ervas mapa todo")
+            or ((CU2.event and CU2.on("sectClash")) and "Sect Clash") or nil
+        if not hrp or hum.Health<=0 then
+            task.wait(0.5)
+        elseif LocalPlayer:GetAttribute("SoulProjecting")~=true then
+            if sessionStart>0 then
+                CU_LOG.add("SOUL","fim",string.format("voltou ao corpo depois de %.0fs; %d catch nesta viagem",os.clock()-sessionStart,tripCatches),0)
+            end
+            caught=setmetatable({},{__mode="k"})
+            sessionStart,tripCatches=0,0
+            if other then
+                CU2.setLabel("soul","Soul: esperando ("..other.." move o personagem)")
+            elseif LocalPlayer:GetAttribute("SoulProjectionLearned")~=true then
+                CU2.setLabel("soul","Soul: o personagem ainda nao aprendeu Soul Projection")
+                CU_LOG.add("SOUL","espera","atributo SoulProjectionLearned nao e true (ainda nao aprendeu)",60)
+            else
+                local med=char:FindFirstChild("IsMeditating")
+                local push=char:FindFirstChild("IsPushingUp")
+                local cultivating=(med and med:IsA("ValueBase") and med.Value==true) or (push and push:IsA("ValueBase") and push.Value==true)
+                local cd=(tonumber(LocalPlayer:GetAttribute("SoulCooldownUntil")) or 0)-Workspace:GetServerTimeNow()
+                if not cultivating then
+                    CU2.setLabel("soul","Soul: precisa estar meditando ou na flexao (ligue Auto Realm ou Auto Body)")
+                    CU_LOG.add("SOUL","espera","nao esta cultivando (IsMeditating/IsPushingUp falso): ligue Auto Realm ou Auto Body",60)
+                elseif cd>0 then
+                    CU2.setLabel("soul",string.format("Soul: recarga %ds",math.ceil(cd)))
+                else
+                    CU2.setLabel("soul","Soul: saindo do corpo")
+                    CU2.fire("SoulProjection","start")
+                    CU2.stats.soulTrips+=1
+                    CU_LOG.add("SOUL","inicio","SoulProjection('start') enviado",0)
+                    task.wait(2.1)
+                    sessionStart=os.clock()
+                end
+            end
+        elseif LocalPlayer:GetAttribute("SoulForming")~=true then
+            if sessionStart==0 then sessionStart=os.clock() end
+            local bodyPos=CU2.bodyPosition() or hrp.Position
+            local found=false
+            local sw=Workspace:FindFirstChild("SpiritWorld")
+            if sw and CU2.remote("SpiritWorld") then
+                local spirits=sw:FindFirstChild("Spirits")
+                if spirits then
+                    for _,spirit in ipairs(spirits:GetChildren()) do
+                        if not CU2.on("soul") or LocalPlayer:GetAttribute("SoulProjecting")~=true then break end
+                        if spirit:IsA("BasePart") and spirit.Parent and not caught[spirit] and (spirit.Position-bodyPos).Magnitude<=465 then
+                            found=true
+                            hrp.CFrame=spirit.CFrame
+                            hrp.AssemblyLinearVelocity=Vector3.zero
+                            CU2.touch(hrp,spirit)
+                            task.wait(0.08)
+                            if spirit.Parent then
+                                hrp.CFrame=spirit.CFrame
+                                CU2.fire("SpiritWorld","catch",spirit)
+                                CU2.stats.soulCatches+=1
+                                tripCatches+=1
+                            end
+                            caught[spirit]=true
+                            task.wait(0.1)
+                            if not spirit.Parent then
+                                CU2.stats.soulGone+=1
+                                CU_LOG.count("Soul: espirito sumiu depois do catch (pego)")
+                            else
+                                CU_LOG.count("Soul: espirito continuou depois do catch")
+                            end
+                        end
+                    end
+                end
+                local herbs=sw:FindFirstChild("Herbs")
+                if herbs then
+                    for _,herb in ipairs(herbs:GetChildren()) do
+                        if not CU2.on("soul") or LocalPlayer:GetAttribute("SoulProjecting")~=true then break end
+                        if herb:IsA("BasePart") and herb:GetAttribute("Picked")~=true then
+                            local prompt=herb:FindFirstChildOfClass("ProximityPrompt")
+                            if prompt and (herb.Position-bodyPos).Magnitude<=465 then
+                                found=true
+                                hrp.CFrame=herb.CFrame*CFrame.new(0,1.5,0)
+                                hrp.AssemblyLinearVelocity=Vector3.zero
+                                CU2.touch(hrp,herb)
+                                task.wait(0.08)
+                                if fireproximityprompt then
+                                    local okP,errP=pcall(fireproximityprompt,prompt)
+                                    if not okP then CU_LOG.error("Soul: fireproximityprompt",errP) end
+                                end
+                                CU2.fire("CollectHerb",herb)
+                                CU2.stats.soulHerbs+=1
+                                CU_LOG.count("Soul: ervas do Spirit World")
+                                task.wait(0.1)
+                            end
+                        end
+                    end
+                end
+            else
+                CU_LOG.add("SOUL","mapa","workspace.SpiritWorld ou o remote SpiritWorld nao existe",30)
+            end
+            if not found then
+                hrp.CFrame=CFrame.new(bodyPos+Vector3.new(0,15,0))
+                hrp.AssemblyLinearVelocity=Vector3.zero
+            end
+            CU2.setLabel("soul",string.format("Soul: fora do corpo ha %.0fs, %d catch",os.clock()-sessionStart,tripCatches))
+            if os.clock()-sessionStart>=18 then
+                hrp.CFrame=CFrame.new(bodyPos+Vector3.new(0,1.5,0))
+                hrp.AssemblyLinearVelocity=Vector3.zero
+                task.wait(0.15)
+                if LocalPlayer:GetAttribute("SoulProjecting")==true then
+                    CU2.fire("SoulProjection","return")
+                    task.wait(1.5)
+                end
+            end
+        end
+        task.wait(0.35)
+    end
+    CU2.setLabel("soul","Soul: desligado")
+end
+
+-- ===== CULTIVO PELO SERVIDOR (Top76) =====
+function CU2.tribulationLoop()
+    while CU2.on("tribulation") do
+        local _,_,hum=CU2.char()
+        if hum and hum.Health>hum.MaxHealth*0.3 then
+            CU2.fire("Tribulation",table.unpack(CU2.TRIBULATION_ARGS))
+            CU_LOG.count("Tribulation: absorb enviado")
+        else
+            CU_LOG.count("Tribulation: esperando (vida abaixo de 30%)")
+        end
+        task.wait(1)
+    end
+end
+function CU2.bodyBreakLoop()
+    while CU2.on("bodyBreak") do
+        local _,_,hum=CU2.char()
+        if hum and hum.Health>hum.MaxHealth*0.3 then
+            CU2.fire("BodyBreakthrough")
+            CU2.fire("BodyBreakthroughCutsceneDone",true)
+            CU_LOG.count("Body Breakthrough servidor: enviado")
+        end
+        task.wait(3)
+    end
+end
+function CU2.blindBreakLoop()
+    while CU2.on("blindBreak") do
+        local _,_,hum=CU2.char()
+        if hum and hum.Health>hum.MaxHealth*0.3 then
+            CU2.fire("Breakthrough")
+            CU2.fire("BreakthroughMinigameResult",true)
+            CU_LOG.count("Breakthrough as cegas: enviado")
+        end
+        task.wait(2)
+    end
+end
+
+-- ===== ORBS (Top76: CultivationOrbClicked a cada 0,5s + tocar nos orbs a 40 studs) =====
+-- Melhoria: so guarda pecas com "orb" no nome (o Top76 guardava todas as pecas do mapa e varria tudo a cada 0,5s).
+function CU2.initOrbCache()
+    if CU2.orbParts then return end
+    CU2.orbParts=setmetatable({},{__mode="k"})
+    local function reg(obj)
+        if obj:IsA("BasePart") and obj.Name:lower():find("orb",1,true) then CU2.orbParts[obj]=true end
+    end
+    for _,obj in ipairs(Workspace:GetDescendants()) do reg(obj) end
+    CU2.track(Workspace.DescendantAdded:Connect(reg))
+    CU2.track(Workspace.DescendantRemoving:Connect(function(obj) CU2.orbParts[obj]=nil end))
+    CU_LOG.add("ORB","cache",CU2.countKeys(CU2.orbParts).." pecas com 'orb' no nome no mapa carregado",0)
+end
+function CU2.orbLoop()
+    CU2.initOrbCache()
+    while CU2.on("orbTouch") do
+        local _,hrp=CU2.char()
+        local touched=0
+        if hrp then
+            for part in pairs(CU2.orbParts) do
+                if part.Parent and (hrp.Position-part.Position).Magnitude<40 and CU2.touch(hrp,part) then touched+=1 end
+            end
+        end
+        CU2.fire("CultivationOrbClicked")
+        if touched>0 then
+            CU_LOG.count("Orbs servidor: orbs tocados",touched)
+            CU_LOG.add("ORB","perto",touched.." orb(s) a menos de 40 studs tocados",10)
+        end
+        task.wait(0.5)
+    end
+end
+
+-- ===== ERVAS NO MAPA TODO (Top76) =====
+-- Melhorias: filtro pela erva da aba Auto, prompt dentro de Attachment/Model, erva que nao coleta espera 10s
+-- (o Top76 tentava a mesma erva sem parar), e o TXT diz se o servidor confirmou cada coleta.
+function CU2.promptPart(prompt)
+    local p=prompt.Parent
+    if p and p:IsA("Attachment") then p=p.Parent end
+    if p and p:IsA("Model") then p=p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart") end
+    if p and p:IsA("BasePart") then return p end
+    return nil
+end
+function CU2.initHerbCache()
+    if CU2.herbPrompts then return end
+    CU2.herbPrompts=setmetatable({},{__mode="k"})
+    local function reg(obj)
+        if obj:IsA("ProximityPrompt") then
+            local spots=Workspace:FindFirstChild("HerbSpots")
+            if obj.Name=="CollectHerbPrompt" or obj.Name:lower():find("herb",1,true) or (spots and obj:IsDescendantOf(spots)) then
+                CU2.herbPrompts[obj]=true
+            end
+        end
+    end
+    for _,obj in ipairs(Workspace:GetDescendants()) do reg(obj) end
+    CU2.track(Workspace.DescendantAdded:Connect(reg))
+    CU2.track(Workspace.DescendantRemoving:Connect(function(obj) CU2.herbPrompts[obj]=nil end))
+    CU_LOG.add("ERVA2","cache",CU2.countKeys(CU2.herbPrompts).." prompts de erva no mapa carregado",0)
+end
+function CU2.bestHerb(fromPos)
+    CU2.initHerbCache()
+    local sw=Workspace:FindFirstChild("SpiritWorld")
+    local now=os.clock()
+    local mode=CU2.s.herbFilter
+    local best=nil
+    local cands=0
+    for prompt in pairs(CU2.herbPrompts) do
+        local part=prompt.Parent and CU2.promptPart(prompt)
+        if not prompt.Parent then
+            CU2.herbPrompts[prompt]=nil
+        elseif part and prompt.Enabled and not (sw and part:IsDescendantOf(sw)) and now>=(CU2.herbCooldown[part] or 0) then
+            local year=CU2.herbYear(part,prompt)
+            if mode==1 or (mode==2 and year>=1000) or (mode==3 and CU2.herbIsSelected(part,prompt,State.selectedHerb)) then
+                cands+=1
+                local dist=(part.Position-fromPos).Magnitude
+                local rank=(year>=1000 and 2) or (year>=100 and 1) or 0
+                if not best or rank>best.rank or (rank==best.rank and dist<best.dist) then
+                    best={part=part,prompt=prompt,dist=dist,year=year,rank=rank}
+                end
+            end
+        end
+    end
+    CU2.herbCandidates=cands
+    return best
+end
+function CU2.streamPoints()
+    local now=os.clock()
+    if CU2.pointsCache and now<(CU2.pointsCacheAt or 0) then return CU2.pointsCache end
+    local points,seen={},{}
+    local function add(pos)
+        if typeof(pos)~="Vector3" then return end
+        local key=math.floor(pos.X/150).."_"..math.floor(pos.Z/150)
+        if not seen[key] then
+            seen[key]=true
+            points[#points+1]=pos
+        end
+    end
+    local anchors=Workspace:FindFirstChild("MapAnchors")
+    if anchors then
+        for _,ch in ipairs(anchors:GetDescendants()) do
+            if ch:IsA("BasePart") then add(ch.Position) end
+        end
+    end
+    for _,mapName in ipairs({"Map_sacred-mountain","Map_withered-valley"}) do
+        local m=Workspace:FindFirstChild(mapName)
+        local sp=m and m:FindFirstChild("Spawns")
+        if sp then
+            for _,p in ipairs(sp:GetChildren()) do
+                if p:IsA("BasePart") then add(p.Position) end
+            end
+        end
+    end
+    -- Melhoria: as 14 zonas do nosso teleporte tambem viram pontos de patrulha.
+    for _,list in ipairs({Constants.QI_ZONES_LIST,Constants.BODY_ZONES_LIST}) do
+        for _,zone in ipairs(list) do add(Constants.EXACT_ZONE_COORDS[zone]) end
+    end
+    for _,pos in ipairs(CU2.FALLBACK_POINTS) do add(pos) end
+    CU2.pointsCache=points
+    CU2.pointsCacheAt=now+15
+    return points
+end
+function CU2.collectHerb(hrp,h)
+    local part,prompt=h.part,h.prompt
+    CU2.setLabel("herb2",string.format("Ervas: indo para %s (%d anos, %.0f studs)",part.Name,math.floor(h.year),h.dist))
+    CU_LOG.add("ERVA2","alvo",string.format("%s | %d anos | %.0f studs | prompt '%s' / '%s'",part:GetFullName(),math.floor(h.year),h.dist,
+        tostring(prompt.ObjectText),tostring(prompt.ActionText)),3)
+    local stand=part.CFrame*CFrame.new(0,1.5,1.8)
+    CU2.safeTeleport(hrp,stand,part,function() return not CU2.on("herb2") or CU2.mobBusy end,-3.2)
+    if not CU2.on("herb2") or CU2.mobBusy then return end
+    if not part.Parent or not prompt.Parent or not prompt.Enabled then
+        CU_LOG.count("Ervas mapa todo: sumiu antes de chegar")
+        return
+    end
+    local before=CU2.lastHerbPickAt
+    if fireproximityprompt then
+        local okP,errP=pcall(fireproximityprompt,prompt)
+        if not okP then CU_LOG.error("Ervas mapa todo: fireproximityprompt",errP) end
+    else
+        local okH,errH=pcall(function()
+            prompt:InputHoldBegin()
+            task.wait(prompt.HoldDuration or 0.3)
+            prompt:InputHoldEnd()
+        end)
+        if not okH then CU_LOG.error("Ervas mapa todo: InputHold",errH) end
+    end
+    CU2.fire("CollectHerb",part)
+    local t0=os.clock()
+    while CU2.on("herb2") and part.Parent and prompt.Enabled and CU2.lastHerbPickAt==before and os.clock()-t0<0.5 do task.wait(0.03) end
+    local dist=(hrp.Position-part.Position).Magnitude
+    if CU2.lastHerbPickAt>before then
+        CU2.stats.herbsOk+=1
+        CU2.herbCooldown[part]=os.clock()+30
+        CU_LOG.count("Ervas mapa todo: coletada (servidor confirmou)")
+    elseif not part.Parent or not prompt.Enabled then
+        CU2.stats.herbsMaybe+=1
+        CU2.herbCooldown[part]=os.clock()+30
+        CU_LOG.count("Ervas mapa todo: prompt sumiu (provavelmente coletada)")
+    else
+        CU2.stats.herbsFail+=1
+        CU2.herbCooldown[part]=os.clock()+10
+        CU_LOG.count("Ervas mapa todo: nao coletou (tenta de novo em 10s)")
+        CU_LOG.add("ERVA2","falhou",string.format("%s nao foi coletada: personagem a %.1f studs, prompt ainda ativo, servidor nao confirmou",part.Name,dist),5)
+    end
+end
+function CU2.patrolStep(hrp,zoneIdx,angle)
+    local points=CU2.streamPoints()
+    if zoneIdx>#points then zoneIdx=1 end
+    local center=points[zoneIdx] or Vector3.new(0,120,0)
+    angle+=math.pi/3
+    if angle>=math.pi*2 then
+        angle=0
+        zoneIdx=(zoneIdx%math.max(1,#points))+1
+    end
+    local nextPos=Vector3.new(center.X+math.cos(angle)*450,center.Y+25,center.Z+math.sin(angle)*450)
+    CU2.setLabel("herb2",string.format("Ervas: nenhuma a vista (%d no filtro), patrulhando ponto %d/%d",CU2.herbCandidates or 0,zoneIdx,#points))
+    CU_LOG.count("Ervas mapa todo: patrulha")
+    CU_LOG.add("ERVA2","patrulha",string.format("nenhuma erva valida (%d prompts conhecidos, filtro %s); indo para (%.0f, %.0f, %.0f), ponto %d/%d",
+        CU2.countKeys(CU2.herbPrompts),CU2.HERB_FILTERS[CU2.s.herbFilter],nextPos.X,nextPos.Y,nextPos.Z,zoneIdx,#points),20,"patrulha")
+    local ok,err=pcall(function() LocalPlayer:RequestStreamAroundAsync(nextPos,2) end)
+    if not ok then CU_LOG.error("Ervas mapa todo: RequestStreamAroundAsync",err) end
+    local platform=CU2.getPlatform()
+    local startPos=hrp.Position
+    local steps=math.max(1,math.ceil((nextPos-startPos).Magnitude/36))
+    for i=1,steps do
+        if not CU2.on("herb2") or CU2.mobBusy or (CU2.event and CU2.on("sectClash")) or not hrp.Parent then break end
+        if i%3==0 and CU2.bestHerb(hrp.Position) then break end
+        local cf=CFrame.new(startPos:Lerp(nextPos,i/steps))
+        platform.CFrame=cf*CFrame.new(0,-3.2,0)
+        hrp.AssemblyLinearVelocity=Vector3.zero
+        hrp.CFrame=cf
+        task.wait(0.10)
+    end
+    return zoneIdx,angle
+end
+function CU2.herb2Loop()
+    CU2.initHerbCache()
+    CU_LOG.add("ERVA2","inicio","ligado: filtro "..CU2.HERB_FILTERS[CU2.s.herbFilter]..", "..CU2.countKeys(CU2.herbPrompts).." prompts de erva conhecidos",0)
+    local zoneIdx,angle=1,0
+    while CU2.on("herb2") do
+        local pause=((CU2.event and CU2.on("sectClash")) and "Sect Clash") or (CU2.mobBusy and "farm de monstros")
+            or (State.isTeleportingZone and "teleporte de zona") or (State.autoKillActive and "Auto Kill") or nil
+        if pause then
+            CU2.setLabel("herb2","Ervas: pausado ("..pause..")")
+            CU_LOG.count("Ervas mapa todo: pausado ("..pause..")")
+            task.wait(0.5)
+        else
+            local _,hrp,hum=CU2.char()
+            if not hrp or hum.Health<=0 then
+                task.wait(0.3)
+            else
+                local h=CU2.bestHerb(hrp.Position)
+                if h then
+                    CU2.collectHerb(hrp,h)
+                elseif CU2.on("streamer") and CU2.s.herbFilter==2 then
+                    CU2.setLabel("herb2","Ervas: esperando o streamer carregar uma erva de 1000 anos")
+                    task.wait(0.3)
+                else
+                    zoneIdx,angle=CU2.patrolStep(hrp,zoneIdx,angle)
+                end
+            end
+            task.wait(0.03)
+        end
+    end
+    CU2.parkPlatformIfIdle()
+    CU2.setLabel("herb2","Ervas: desligado")
+end
+-- Streamer do Top76 corrigido: LocalPlayer:RequestStreamAroundAsync (no workspace o metodo nao existe e o dele nao fazia nada).
+function CU2.streamerLoop()
+    local idx=1
+    while CU2.on("streamer") do
+        local points=CU2.streamPoints()
+        if #points>0 then
+            if idx>#points then idx=1 end
+            local pos=points[idx]
+            idx+=1
+            local ok,err=pcall(function() LocalPlayer:RequestStreamAroundAsync(pos,2) end)
+            if ok then
+                CU_LOG.count("Streamer: areas carregadas")
+            else
+                CU_LOG.count("Streamer: erro")
+                CU_LOG.error("Streamer",err)
+            end
+        end
+        task.wait(0.8)
+    end
+end
+
+-- ===== PILULAS PELO SERVIDOR (Top76: CauldronStartBrew / CauldronStoke(0.4) / CauldronClaim) =====
+function CU2.brewRecipeText()
+    return CU2.s.brewRecipe==1 and ("Pilula da aba Auto ("..tostring(State.selectedPill)..")") or CU2.BREW_RECIPES[2]
+end
+function CU2.brewLoop()
+    CU_LOG.add("CALDEIRAO","inicio",string.format("Auto Pilulas pelo servidor ligado: %s | ano minimo %d | ervas: %s",CU2.brewRecipeText(),
+        CU2.BREW_YEARS[CU2.s.brewYear],CU2.herbCountText()),0)
+    while CU2.on("brew") do
+        CU2.fire("CauldronClaim")
+        task.wait(0.3)
+        if CU2.cauldronStatus=="brewing" then
+            CU2.fire("CauldronStoke",0.4)
+            CU_LOG.count("Pilulas servidor: Stoke(0.4)")
+            task.wait(0.8)
+        else
+            local payload,note=CU2.buildBrew(CU2.herbCounts,CU2.s.brewRecipe,CU2.BREW_YEARS[CU2.s.brewYear],State.selectedPill)
+            if payload then
+                local statusBefore=CU2.cauldronStatus
+                CU2.fire("CauldronStartBrew",payload)
+                CU2.stats.brewsStarted+=1
+                CU_LOG.count("Pilulas servidor: Brew enviado")
+                CU_LOG.add("CALDEIRAO","Brew",CU2.brewRecipeText()..": "..note.." (status antes: "..tostring(statusBefore)..")",0)
+                local t0=os.clock()
+                while CU2.on("brew") and CU2.cauldronStatus==statusBefore and os.clock()-t0<3 do task.wait(0.1) end
+                if CU2.cauldronStatus==statusBefore then
+                    CU2.lastBrewNote=os.date("%H:%M:%S").." Brew enviado ("..note.."), mas o servidor nao mudou o status em 3s"
+                    CU_LOG.count("Pilulas servidor: Brew sem resposta do servidor (espera 5s)")
+                    CU_LOG.add("CALDEIRAO","sem resposta","o servidor nao mandou CauldronStateUpdate em 3s depois do Brew (recusou ou o nome do status e outro); espera 5s",0)
+                    task.wait(5)
+                else
+                    CU2.lastBrewNote=os.date("%H:%M:%S").." Brew: "..note.." -> status "..tostring(CU2.cauldronStatus)
+                end
+            else
+                CU2.lastBrewNote=os.date("%H:%M:%S").." sem Brew: "..note
+                CU_LOG.count("Pilulas servidor: sem ervas para a receita")
+                CU_LOG.add("CALDEIRAO","sem Brew",note,30,"sem-brew")
+            end
+            task.wait(1.5)
+        end
+    end
+end
+
+-- ===== DAILY (Top76: ClaimReward("daily") + CauldronClaim) =====
+function CU2.claimDaily(why)
+    CU2.fire("ClaimReward","daily")
+    CU2.fire("CauldronClaim")
+    CU_LOG.count("Daily: pedidos ("..why..")")
+    CU_LOG.add("DAILY",why,"ClaimReward('daily') e CauldronClaim enviados; a resposta aparece em EVENTOS DO SERVIDOR RECEBIDOS",0)
+end
+function CU2.dailyLoop()
+    while CU2.on("dailyAuto") do
+        CU2.claimDaily("automatico")
+        local t0=os.clock()
+        while CU2.on("dailyAuto") and os.clock()-t0<900 do task.wait(5) end
+    end
+end
+
+CU2.LOOPS={
+    mobFarm={"Combate: farm de monstros",CU2.mobFarmLoop},
+    skills={"Combate: skills pelo servidor",CU2.skillsLoop},
+    sectClash={"Sect Clash",CU2.clashLoop},
+    blindBreak={"Breakthrough as cegas",CU2.blindBreakLoop},
+    bodyBreak={"Body Breakthrough servidor",CU2.bodyBreakLoop},
+    tribulation={"Tribulation",CU2.tribulationLoop},
+    soul={"Soul Projection",CU2.soulLoop},
+    orbTouch={"Orbs servidor",CU2.orbLoop},
+    herb2={"Ervas mapa todo",CU2.herb2Loop},
+    streamer={"Streamer",CU2.streamerLoop},
+    brew={"Pilulas servidor",CU2.brewLoop},
+    dailyAuto={"Daily automatico",CU2.dailyLoop}}
+-- Um loop por chave: ligar de novo enquanto o anterior ainda roda nao cria outro.
+function CU2.start(key)
+    local def=CU2.LOOPS[key]
+    if not def or CU2.running[key] or not CU2.on(key) then return end
+    CU2.running[key]=true
+    CU_LOG.spawnLoop(def[1],function()
+        def[2]()
+        CU2.running[key]=nil
+    end)
+end
+
+-- ===== OUVINTES DO SERVIDOR (sempre ligados; cada um so age com a sua funcao ligada) =====
+do
+    local function listen(name,fn)
+        local r=CU2.remote(name)
+        if r and r:IsA("RemoteEvent") then
+            CU2.track(r.OnClientEvent:Connect(function(...)
+                CU_LOG.try("Ouvinte "..name,fn,...)
+            end))
+            return
+        end
+        CU_LOG.add("AVISO","CU2","ouvinte "..name.." nao ligado: o remote nao existe",0)
+    end
+    listen("HerbInventoryUpdate",function(data,picked)
+        if type(data)=="table" then CU2.setHerbCounts(data,"HerbInventoryUpdate") end
+        if picked then
+            CU2.lastHerbPickAt=os.clock()
+            CU_LOG.count("Ervas: servidor confirmou coleta (HerbInventoryUpdate)")
+        end
+    end)
+    listen("CauldronStateUpdate",function(data)
+        if type(data)~="table" then return end
+        if type(data.herbCounts)=="table" then CU2.setHerbCounts(data.herbCounts,"CauldronStateUpdate") end
+        if data.status~=nil then CU2.setCauldronStatus(tostring(data.status)) end
+    end)
+    listen("CauldronBrewComplete",function()
+        if CU2.on("brew") then
+            CU_LOG.count("Pilulas servidor: CauldronBrewComplete -> Claim")
+            CU2.fire("CauldronClaim")
+        end
+    end)
+    -- Pula o minijogo do Breakthrough (Top76). Se o minijogo continuar aberto, o nosso leitor da tela joga como antes.
+    listen("StartBreakthroughMinigame",function()
+        CU_LOG.count("Breakthrough: servidor abriu o minijogo (StartBreakthroughMinigame)")
+        if not (State.autoBreakthroughActive and CU2.on("skipTrial")) then return end
+        task.wait(0.2)
+        CU2.fire("BreakthroughMinigameResult",true)
+        CU2.stats.trialSkips+=1
+        CU_LOG.add("TRIAL","servidor","minijogo aberto: BreakthroughMinigameResult(true) enviado para pular",0)
+        task.wait(2.5)
+        if CU2.trialVisible() then
+            CU2.stats.trialOpen+=1
+            CU_LOG.add("TRIAL","servidor","o minijogo CONTINUOU aberto 2,7s depois do (true): o servidor nao aceitou; o script joga pela tela",0)
+        else
+            CU2.stats.trialClosed+=1
+            CU_LOG.add("TRIAL","servidor","o minijogo fechou depois do (true)",0)
+        end
+    end)
+    listen("MapEvent",function(action,payload) CU2.onMapEvent(action,payload) end)
+end
+
+-- ===== ABAS "COMBATE" E "EXTRA" =====
+function CU2.refreshMobRows()
+    local rows=CU2.ui.mobRows
+    if next(rows)==nil then return end
+    local _,hrp=CU2.char()
+    local info={}
+    for _,m in ipairs(CU2.scanMobs(false)) do
+        local i=info[m.model.Name]
+        if not i then
+            i={n=0}
+            info[m.model.Name]=i
+        end
+        i.n+=1
+        local d=hrp and (m.hrp.Position-hrp.Position).Magnitude or 0
+        if not i.d or d<i.d then
+            i.d=d
+            i.hp=m.hum.Health
+            i.max=m.hum.MaxHealth
+        end
+    end
+    for name,btn in pairs(rows) do
+        if btn.Parent then
+            local on=CU2.s.selectedMobs[name]==true
+            local i=info[name]
+            local text=(on and "[x] " or "[  ] ")..name..(i and string.format(" (%d) %d/%d, %.0f studs",i.n,math.floor(i.hp),math.floor(i.max),i.d) or " (nenhum vivo)")
+            if btn.Text~=text then btn.Text=text end
+            btn.BackgroundColor3=on and Color3.fromRGB(45,110,70) or Color3.fromRGB(60,55,70)
+        end
+    end
+end
+function CU2.tpToMob(name)
+    local _,hrp=CU2.char()
+    if not hrp then return end
+    local best,bd=nil,1e9
+    for _,m in ipairs(CU2.scanMobs(false)) do
+        if m.model.Name==name then
+            local d=(m.hrp.Position-hrp.Position).Magnitude
+            if d<bd then best,bd=m,d end
+        end
+    end
+    if not best then
+        CU_LOG.add("COMBATE","TP","nenhum "..name.." vivo",0)
+        return
+    end
+    CU_LOG.add("COMBATE","TP",string.format("%s a %.0f studs",name,bd),0)
+    CU2.safeTeleport(hrp,best.hrp.CFrame*CFrame.new(CU2.offsetVec()),best.hrp)
+end
+function CU2.rebuildMobList()
+    local list=CU2.ui.mobList
+    if not list then return end
+    for _,ch in ipairs(list:GetChildren()) do
+        if ch:IsA("GuiObject") then ch:Destroy() end
+    end
+    CU2.ui.mobRows={}
+    CU2.scanMobs(false)
+    local names=CU2.mobNames or {}
+    CU_LOG.add("COMBATE","lista",string.format("%d tipos de monstro: %s | %s",#names,table.concat(names,", "),tostring(CU2.containerText)),0)
+    if #names==0 then
+        local l=Instance.new("TextLabel")
+        l.Size=UDim2.new(1,0,0,40)
+        l.BackgroundTransparency=1
+        l.TextWrapped=true
+        l.Text="Nenhum monstro nos acampamentos (BanditCamp, CultivatorCamps, WorldBoss, bonecos). Chegue perto de um e toque em Escanear."
+        l.TextColor3=Color3.fromRGB(170,170,170)
+        l.TextSize=10
+        l.Font=Enum.Font.Gotham
+        l.TextXAlignment=Enum.TextXAlignment.Left
+        l.Parent=list
+        CU2.noMobsFound()
+        return
+    end
+    local all=Instance.new("TextButton")
+    all.Size=UDim2.new(1,0,0,26)
+    all.BackgroundColor3=Color3.fromRGB(50,90,70)
+    all.Text="Marcar / desmarcar todos"
+    all.TextColor3=Color3.fromRGB(255,255,255)
+    all.TextSize=11
+    all.Font=Enum.Font.GothamBold
+    all.LayoutOrder=0
+    all.Parent=list
+    addCorner(all,4)
+    all.Activated:Connect(function()
+        CU_LOG.try("Marcar todos os monstros",function()
+            local allOn=true
+            for _,n in ipairs(names) do
+                if CU2.s.selectedMobs[n]~=true then allOn=false end
+            end
+            for _,n in ipairs(names) do CU2.s.selectedMobs[n]=not allOn end
+            CU2.save()
+            CU_LOG.add("TOGGLE","Monstros",(not allOn) and "todos marcados" or "todos desmarcados",0)
+            CU2.refreshMobRows()
+        end)
+    end)
+    for i,name in ipairs(names) do
+        local row=Instance.new("Frame")
+        row.Size=UDim2.new(1,0,0,28)
+        row.BackgroundTransparency=1
+        row.LayoutOrder=i
+        row.Parent=list
+        local t=Instance.new("TextButton")
+        t.Size=UDim2.new(1,-54,1,0)
+        t.BackgroundColor3=Color3.fromRGB(60,55,70)
+        t.Text=name
+        t.TextColor3=Color3.fromRGB(255,255,255)
+        t.TextSize=10
+        t.TextWrapped=true
+        t.Font=Enum.Font.GothamBold
+        t.TextXAlignment=Enum.TextXAlignment.Left
+        t.Parent=row
+        addCorner(t,4)
+        local tp=Instance.new("TextButton")
+        tp.Size=UDim2.new(0,50,1,0)
+        tp.Position=UDim2.new(1,-50,0,0)
+        tp.BackgroundColor3=Color3.fromRGB(60,100,160)
+        tp.Text="TP"
+        tp.TextColor3=Color3.fromRGB(255,255,255)
+        tp.TextSize=11
+        tp.Font=Enum.Font.GothamBold
+        tp.Parent=row
+        addCorner(tp,4)
+        t.Activated:Connect(function()
+            CU_LOG.try("Monstro "..name,function()
+                CU2.s.selectedMobs[name]=not (CU2.s.selectedMobs[name]==true)
+                CU2.save()
+                CU_LOG.add("TOGGLE","Monstro "..name,CU2.s.selectedMobs[name] and "marcado" or "desmarcado",0)
+                CU2.refreshMobRows()
+            end)
+        end)
+        tp.Activated:Connect(function() CU_LOG.try("TP monstro "..name,CU2.tpToMob,name) end)
+        CU2.ui.mobRows[name]=t
+    end
+    CU2.refreshMobRows()
+end
+
+do
+    local order=0
+    local function nextOrder()
+        order+=1
+        return order
+    end
+    local function setupPage(p)
+        local layout=Instance.new("UIListLayout")
+        layout.SortOrder=Enum.SortOrder.LayoutOrder
+        layout.Padding=UDim.new(0,5)
+        layout.Parent=p
+        layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            p.CanvasSize=UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+24)
+        end)
+    end
+    local function header(p,text,color)
+        local l=Instance.new("TextLabel")
+        l.Size=UDim2.new(0.96,0,0,30)
+        l.BackgroundTransparency=1
+        l.TextWrapped=true
+        l.Text=text
+        l.TextColor3=color or Color3.fromRGB(180,180,180)
+        l.TextSize=12
+        l.Font=Enum.Font.GothamBold
+        l.TextXAlignment=Enum.TextXAlignment.Left
+        l.TextYAlignment=Enum.TextYAlignment.Bottom
+        l.LayoutOrder=nextOrder()
+        l.Parent=p
+        return l
+    end
+    local function label(p,text,key,height)
+        local l=Instance.new("TextLabel")
+        l.Size=UDim2.new(0.96,0,0,height or 24)
+        l.BackgroundColor3=Color3.fromRGB(26,21,31)
+        l.TextWrapped=true
+        l.Text=text
+        l.TextColor3=Color3.fromRGB(200,200,140)
+        l.TextSize=11
+        l.Font=Enum.Font.GothamMedium
+        l.TextXAlignment=Enum.TextXAlignment.Left
+        l.TextYAlignment=Enum.TextYAlignment.Top
+        l.LayoutOrder=nextOrder()
+        l.Parent=p
+        addCorner(l,5)
+        local pad=Instance.new("UIPadding")
+        pad.PaddingLeft=UDim.new(0,6)
+        pad.PaddingTop=UDim.new(0,3)
+        pad.Parent=l
+        if key then CU2.ui.labels[key]=l end
+        return l
+    end
+    local function button(p,text,color,onClick)
+        local b=Instance.new("TextButton")
+        b.Size=UDim2.new(0.96,0,0,32)
+        b.BackgroundColor3=color or Color3.fromRGB(50,40,60)
+        b.Text=text
+        b.TextWrapped=true
+        b.TextColor3=Color3.fromRGB(255,255,255)
+        b.TextSize=11
+        b.Font=Enum.Font.GothamBold
+        b.LayoutOrder=nextOrder()
+        b.Parent=p
+        addCorner(b,6)
+        b.Activated:Connect(function() CU_LOG.try("Botao "..text,onClick,b) end)
+        return b
+    end
+    local function toggle(p,text,key,color,after)
+        local row,setter=createToggleRow(p,0,text,CU2.s[key],color,function(val)
+            CU2.s[key]=val
+            CU2.save()
+            if val and CU2.EXCLUSIVE[key] then CU2.exclusive(key) end
+            if after then after(val) end
+            if val then CU2.start(key) end
+        end)
+        row.LayoutOrder=nextOrder()
+        local lbl=row:FindFirstChildWhichIsA("TextLabel")
+        if lbl then
+            lbl.TextWrapped=true
+            lbl.TextSize=11
+        end
+        CU2.ui.setters[key]=setter
+        return row
+    end
+
+    local c=CU2.tabs.Combate and CU2.tabs.Combate.page
+    if c then
+        setupPage(c)
+        header(c,"Farm de monstros pelo servidor (CombatHit: sem tecla, funciona no celular)",Color3.fromRGB(220,120,130))
+        toggle(c,"Auto Farm Monstros","mobFarm",Color3.fromRGB(210,50,70))
+        toggle(c,"Turbo (2 golpes por ciclo)","turbo")
+        toggle(c,"Ataque em grupo (raio 38 studs)","aoe",nil,function(val)
+            if not val then CU2.resetHitboxes() end
+        end)
+        toggle(c,"Skills Z X C V pelo servidor","skills")
+        button(c,"Posicao: "..CU2.offsetText(),Color3.fromRGB(70,60,110),function(b)
+            CU2.s.offset=(CU2.s.offset%#CU2.OFFSETS)+1
+            CU2.save()
+            b.Text="Posicao: "..CU2.offsetText()
+            CU_LOG.add("TOGGLE","Posicao do farm",CU2.offsetText(),0)
+        end)
+        label(c,"Alvo: farm desligado","target",24)
+        button(c,"Escanear monstros do mapa",Color3.fromRGB(40,90,140),function() CU2.rebuildMobList() end)
+        local list=Instance.new("Frame")
+        list.Size=UDim2.new(0.96,0,0,0)
+        list.BackgroundTransparency=1
+        list.LayoutOrder=nextOrder()
+        list.Parent=c
+        local ll=Instance.new("UIListLayout")
+        ll.SortOrder=Enum.SortOrder.LayoutOrder
+        ll.Padding=UDim.new(0,3)
+        ll.Parent=list
+        ll:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            list.Size=UDim2.new(0.96,0,0,ll.AbsoluteContentSize.Y)
+        end)
+        CU2.ui.mobList=list
+        header(c,"Sect Clash (evento de guerra entre seitas)",Color3.fromRGB(220,120,130))
+        toggle(c,"Auto Sect Clash","sectClash")
+        label(c,"Sect Clash: desligado","clash",34)
+    end
+
+    local e=CU2.tabs.Extra and CU2.tabs.Extra.page
+    if e then
+        setupPage(e)
+        header(e,"Cultivo pelo servidor (pular o minijogo precisa do Auto Breakthrough da aba Auto)")
+        toggle(e,"Pular minijogo do Breakthrough","skipTrial")
+        toggle(e,"Breakthrough as cegas (a cada 2s)","blindBreak")
+        toggle(e,"Auto Body Breakthrough (servidor)","bodyBreak")
+        toggle(e,"Auto Tribulation","tribulation")
+        toggle(e,"Soul Projection + pegar espiritos","soul")
+        label(e,"Soul: desligado","soul",34)
+        toggle(e,"Orbs de Qi pelo servidor","orbTouch")
+        header(e,"Ervas no mapa todo (teleporte rapido)")
+        toggle(e,"Auto Ervas mapa todo","herb2")
+        button(e,"Filtro: "..CU2.HERB_FILTERS[CU2.s.herbFilter],Color3.fromRGB(110,90,40),function(b)
+            CU2.s.herbFilter=(CU2.s.herbFilter%#CU2.HERB_FILTERS)+1
+            CU2.save()
+            b.Text="Filtro: "..CU2.HERB_FILTERS[CU2.s.herbFilter]
+            CU_LOG.add("TOGGLE","Filtro de ervas",CU2.HERB_FILTERS[CU2.s.herbFilter],0)
+        end)
+        toggle(e,"Carregar partes distantes do mapa","streamer")
+        label(e,"Ervas: desligado","herb2",34)
+        header(e,"Pilulas pelo servidor (sem abrir o caldeirao)")
+        CU2.ui.recipeBtn=button(e,"Receita: "..CU2.brewRecipeText(),Color3.fromRGB(70,100,150),function(b)
+            CU2.s.brewRecipe=(CU2.s.brewRecipe%#CU2.BREW_RECIPES)+1
+            CU2.save()
+            b.Text="Receita: "..CU2.brewRecipeText()
+            CU_LOG.add("TOGGLE","Receita (servidor)",CU2.brewRecipeText(),0)
+        end)
+        local function yearText()
+            local y=CU2.BREW_YEARS[CU2.s.brewYear]
+            return y==0 and "Ano minimo da erva: qualquer" or ("Ano minimo da erva: "..y.."+")
+        end
+        button(e,yearText(),Color3.fromRGB(70,70,110),function(b)
+            CU2.s.brewYear=(CU2.s.brewYear%#CU2.BREW_YEARS)+1
+            CU2.save()
+            b.Text=yearText()
+            CU_LOG.add("TOGGLE","Ano minimo (servidor)",yearText(),0)
+        end)
+        toggle(e,"Auto Pilulas pelo servidor","brew")
+        label(e,"Caldeirao: ?","brew",60)
+        header(e,"Outros")
+        button(e,"Pegar Daily + Caldeirao agora",Color3.fromRGB(50,140,140),function() CU2.claimDaily("botao") end)
+        toggle(e,"Daily automatico (a cada 15 min)","dailyAuto")
+        CU2.ui.zoneBtn=button(e,"Avisar zona ao servidor: "..tostring(State.selectedQiZone),Color3.fromRGB(80,60,140),function(b)
+            CU2.fire("ZoneChanged",State.selectedQiZone)
+            CU_LOG.add("ZONA","ZoneChanged","enviado: "..tostring(State.selectedQiZone).." (zona Qi escolhida na aba Location)",0)
+            b.Text="Avisar zona ao servidor: "..tostring(State.selectedQiZone)
+        end)
+        toggle(e,"Anti-AFK","antiAfk")
+    end
+
+    -- Atualiza a lista de monstros e o caldeirao so com a aba aberta (no celular, varrer a toa pesa).
+    CU_LOG.spawnLoop("CU2 telas",function()
+        while not CU2.stopped and UI.ScreenGui and UI.ScreenGui.Parent do
+            if UI.MainFrame and UI.MainFrame.Visible then
+                local ct=CU2.tabs.Combate
+                if ct and ct.page.Visible then CU2.refreshMobRows() end
+                local et=CU2.tabs.Extra
+                if et and et.page.Visible then
+                    CU2.setLabel("brew",string.format("Caldeirao: %s | Brew enviados %d, terminados %d\nErvas: %s\nUltimo: %s",tostring(CU2.cauldronStatus),
+                        CU2.stats.brewsStarted,CU2.stats.brewsDone,CU2.herbCountText(),CU2.lastBrewNote))
+                    if CU2.ui.recipeBtn then CU2.ui.recipeBtn.Text="Receita: "..CU2.brewRecipeText() end
+                    if CU2.ui.zoneBtn then CU2.ui.zoneBtn.Text="Avisar zona ao servidor: "..tostring(State.selectedQiZone) end
+                end
+            end
+            task.wait(0.7)
+        end
+    end)
+end
+
+-- ===== INICIO: mortes, anti-AFK, religa o que estava ligado =====
+do
+    CU_LOG.add("INFO","CU2","remotes do Top76 neste jogo: "..CU2.remoteCheck(),0)
+    local saved={}
+    for _,k in ipairs(CU2.LABEL_ORDER) do
+        if CU2.s[k] then saved[#saved+1]=CU2.LABELS[k] end
+    end
+    CU_LOG.add("INFO","CU2","funcoes CU2 salvas como ligadas (religam agora): "..(#saved>0 and table.concat(saved,", ") or "nenhuma"),0)
+    local function hookChar(char)
+        local hum=char:WaitForChild("Humanoid",10)
+        if not hum then
+            CU_LOG.add("AVISO","CU2","personagem sem Humanoid em 10s: a morte desta vida nao sera registrada",0)
+            return
+        end
+        CU2.track(hum.Died:Connect(function() CU_LOG.try("CU2 morte",CU2.onDeath,char) end))
+    end
+    if LocalPlayer.Character then
+        task.spawn(function() CU_LOG.try("CU2 personagem",hookChar,LocalPlayer.Character) end)
+    end
+    CU2.track(LocalPlayer.CharacterAdded:Connect(function(char) CU_LOG.try("CU2 personagem",hookChar,char) end))
+    CU2.track(LocalPlayer.Idled:Connect(function()
+        if not CU2.on("antiAfk") then return end
+        local ok,err=pcall(function()
+            local vu=game:GetService("VirtualUser")
+            vu:CaptureController()
+            vu:ClickButton2(Vector2.new(0,0))
+        end)
+        CU2.stats.afk+=1
+        if ok then
+            CU_LOG.add("INFO","Anti-AFK","o Roblox avisou que ficou parado; clique do VirtualUser enviado",0)
+        else
+            CU_LOG.error("Anti-AFK",err)
+        end
+    end))
+    for _,key in ipairs(CU2.LABEL_ORDER) do
+        if CU2.on(key) then CU2.start(key) end
+    end
+    task.spawn(function() CU_LOG.try("CU2 lista de monstros",CU2.rebuildMobList) end)
 end
