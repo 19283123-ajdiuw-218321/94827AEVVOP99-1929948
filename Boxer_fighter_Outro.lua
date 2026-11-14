@@ -114,7 +114,7 @@ local Constants = {
         "Dusty Courtyard", "Iron Fist Dojo", "Stone Peak Arena",
         "Jade Colosseum", "Dragon Spine Ridge", "Heaven's Forge", "Immortal Crucible"
     },
-    -- Koordinat Eksak Hasil Scanner Workspace Cultivation Unbound
+    -- Koordinat Eksak Hasil Scanner Workspace
     EXACT_ZONE_COORDS = {
         -- Qi Zones
         ["Verdant Valley"]    = Vector3.new(-190, 5, 120),
@@ -427,7 +427,7 @@ function CU_LOG.scanText()
 end
 function CU_LOG.dump(compact)
     local envCaps,envPlat=CU_LOG.env()
-    local header=string.format("Cultivation Unbound | Diagnostico %s | %s\nCarregado em %s (%s de sessao) | Funcoes ligadas: %s\nSelecionados: erva=%s, pilula=%s, zona Qi=%s, zona corpo=%s, alvo=%s, velocidade de voo=%s\n[AMBIENTE] %s\n[AMBIENTE] %s\n[AMBIENTE] %s\n[AMBIENTE] remotes: %s\n\n",
+    local header=string.format("Hub | Diagnostico %s | %s\nCarregado em %s (%s de sessao) | Funcoes ligadas: %s\nSelecionados: erva=%s, pilula=%s, zona Qi=%s, zona corpo=%s, alvo=%s, velocidade de voo=%s\n[AMBIENTE] %s\n[AMBIENTE] %s\n[AMBIENTE] %s\n[AMBIENTE] remotes: %s\n\n",
         CU_LOG.version,os.date("%Y-%m-%d %H:%M:%S"),CU_LOG.startedStamp,CU_LOG.secs(os.clock()-CU_LOG.startedAt),CU_LOG.activeList(),
         tostring(State.selectedHerb),tostring(State.selectedPill),tostring(State.selectedQiZone),tostring(State.selectedBodyZone),
         tostring(State.selectedTargetPlayerName),tostring(State.flySpeed),
@@ -472,7 +472,7 @@ end
 CU_LOG.add("INFO","Inicio","Cultivation Hub carregado com o log "..CU_LOG.version)
 
 -------------------------------------------------------------------------
--- CU2: TUDO DO SCRIPT DO TOP76 (github.com/Top76/Cultivation-Unbound, "Murim Hub V24") DENTRO DO NOSSO HUB
+-- CU2: TUDO DO SCRIPT DO TOP76 ("Murim Hub V24") DENTRO DO NOSSO HUB
 -- O jeito dele: mandar os comandos direto para o servidor (CombatHit, UseSkill, CauldronStartBrew,
 -- BreakthroughMinigameResult...), sem tecla e sem clique na tela, por isso funciona no celular.
 -- Tudo na tabela global CU2 (nenhum local novo no topo: limite de 200 registradores).
