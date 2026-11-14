@@ -177,7 +177,7 @@ local UI = {}
 -- enviados e eventos do servidor recebidos, cliques na tela por metodo, teclas simuladas, toggles e o custo das
 -- varreduras da tela. Botoes na aba "Logs".
 -------------------------------------------------------------------------
-CU_LOG={version="CU2",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
+CU_LOG={version="CU2.2",entries={},lastSeen={},errors={},errorOrder={},counts={},countOrder={},
     remotes={},remoteOrder={},toggles={},startedAt=os.clock(),startedStamp=os.date("%Y-%m-%d %H:%M:%S"),
     scans={},autoSave=true,autoSaveEvery=300,lastAutoSave=os.clock()}
 function CU_LOG.onError(e) return debug.traceback(tostring(e),2) end
@@ -482,13 +482,13 @@ CU_LOG.add("INFO","Inicio","Cultivation Hub carregado com o log "..CU_LOG.versio
 CU2={version="CU2",s={},stopped=false,running={},conns={},tabs={},ui={labels={},setters={},mobRows={}},
     fights={},deaths={},events={},sentArgs={},expanded={},
     blacklist=setmetatable({},{__mode="k"}),herbCooldown=setmetatable({},{__mode="k"}),
-    herbCounts={},herbCountsText="",cauldronStatus="?",lastHerbPickAt=0,lastBrewNote="ainda nao tentou",
+    herbCounts={},herbCountsText="",tribs={},trib=nil,serverMsgs={},serverMsgOrder={},cauldronStatus="?",lastHerbPickAt=0,lastBrewNote="ainda nao tentou",
     mob=nil,mobBusy=false,targetPart=nil,event=nil,
     stats={hitAccepted=nil,trialSkips=0,trialClosed=0,trialOpen=0,soulTrips=0,soulCatches=0,soulGone=0,soulHerbs=0,
         brewsStarted=0,brewsDone=0,herbsOk=0,herbsMaybe=0,herbsFail=0,clashEvents=0,clashHits=0,afk=0},
     NO_DAMAGE_SECS=8,
     defaults={mobFarm=false,turbo=true,aoe=true,skills=false,offset=3,sectClash=false,
-        skipTrial=true,blindBreak=false,bodyBreak=false,tribulation=false,soul=false,orbTouch=false,
+        skipTrial=true,blindBreak=false,bodyBreak=false,tribulation=true,soul=false,orbTouch=false,
         herb2=false,herbFilter=1,streamer=false,brew=false,brewRecipe=1,brewYear=1,
         dailyAuto=false,antiAfk=true,selectedMobs={}},
     LABEL_ORDER={"mobFarm","skills","sectClash","blindBreak","bodyBreak","tribulation","soul","orbTouch","herb2","streamer","brew","dailyAuto"},
@@ -506,7 +506,7 @@ CU2={version="CU2",s={},stopped=false,running={},conns={},tabs={},ui={labels={},
         "CauldronStoke","CauldronStateUpdate","Breakthrough","BreakthroughMinigameResult","StartBreakthroughMinigame",
         "BodyBreakthrough","BodyBreakthroughCutsceneDone","Tribulation","SoulProjection","SpiritWorld","CultivationOrbClicked",
         "ZoneChanged","ClaimReward","StartMeditate","StartPushup","CultivateResumed"},
-    TRIBULATION_ARGS={"absorb",14,-0.014265060424804688},
+    TRIB_LEAD=0.015,
     OFFSETS={
         {"Embaixo da terra, bem fundo (-12)",Vector3.new(0,-12,0)},
         {"Embaixo da terra, fundo (-8)",Vector3.new(0,-8,0)},
@@ -864,6 +864,111 @@ function CU2.onDeath(char)
     CU_LOG.add("MORTE","personagem",line,0)
 end
 
+-- Tribulacao: o servidor manda "gather" (comeca), um "bolt" por raio (numero do raio, horario exato do raio no relogio
+-- do servidor, tipo, janela), "strike" (resultado do raio: miss/...) e "end" (sucesso, numero). O Top76 mandava sempre
+-- ("absorb", 14, -0.0143): raio 14 num tempo fixo, por isso todo raio dava miss. Aqui cada raio e respondido com o
+-- numero dele, TRIB_LEAD segundos antes do horario, com a diferenca real de tempo (como o -0.0143 dele).
+function CU2.newTrib(kind,tier)
+    CU2.trib={startStamp=os.date("%H:%M:%S"),startAt=os.clock(),kind=tostring(kind or "?"),tier=tostring(tier or "?"),
+        bolts={},order={},hits=0,misses=0,answered=0}
+    return CU2.trib
+end
+function CU2.onTribulation(action,player,...)
+    if player~=LocalPlayer then return nil end
+    action=tostring(action)
+    CU_LOG.count("Tribulacao: evento "..action)
+    CU_LOG.add("TRIBULACAO",action,CU2.describeArgs(...),0)
+    if action=="gather" then
+        local _,tier,kind=...
+        CU2.newTrib(kind,tier)
+    elseif action=="bolt" then
+        local idx,hitTime,kind,window=...
+        local t=CU2.trib or CU2.newTrib("?","?")
+        local ht=tonumber(hitTime)
+        local b={idx=idx,hitTime=ht,kind=tostring(kind),window=window,lead=ht and (ht-Workspace:GetServerTimeNow()) or nil}
+        t.bolts[idx]=b
+        t.order[#t.order+1]=idx
+        return b
+    elseif action=="strike" then
+        local idx,result=...
+        result=tostring(result)
+        CU_LOG.count("Tribulacao: raio "..result)
+        local t=CU2.trib
+        if t then
+            local b=t.bolts[idx]
+            if b then b.result=result end
+            if result=="miss" then t.misses+=1 else t.hits+=1 end
+        end
+    elseif action=="end" then
+        local success,value=...
+        local t=CU2.trib or CU2.newTrib("?","?")
+        local per={}
+        for _,i in ipairs(t.order) do
+            local b=t.bolts[i]
+            per[#per+1]=string.format("%s:%s(%s%s)",tostring(i),b.result or "?",b.answer or "nao respondido",
+                b.offset and string.format(" %+.3fs",b.offset) or "")
+        end
+        local line=string.format("%s %s nivel %s: %d raios, %d respondidos, %d acertos, %d erros | fim: %s (%s) em %.0fs | por raio: %s",
+            t.startStamp,t.kind,t.tier,#t.order,t.answered,t.hits,t.misses,success==true and "PASSOU" or "FALHOU",tostring(value),
+            os.clock()-t.startAt,#per>0 and table.concat(per,", ") or "-")
+        CU2.tribs[#CU2.tribs+1]=line
+        if #CU2.tribs>10 then table.remove(CU2.tribs,1) end
+        CU_LOG.count(success==true and "Tribulacao: passou" or "Tribulacao: falhou")
+        CU_LOG.add("TRIBULACAO","fim",line,0)
+        CU2.trib=nil
+    end
+    return nil
+end
+function CU2.answerBolt(b)
+    local t=CU2.trib
+    if not CU2.on("tribulation") then
+        b.answer=CU2.stopped and "janela fechada (X)" or "Auto Tribulation desligado"
+        CU_LOG.add("TRIBULACAO","raio "..tostring(b.idx),"NAO respondido: "..b.answer,0)
+        return false
+    end
+    if not b.hitTime then
+        b.answer="sem horario no evento"
+        CU_LOG.add("TRIBULACAO","raio "..tostring(b.idx),"NAO respondido: o evento bolt veio sem horario",0)
+        return false
+    end
+    local target=b.hitTime-CU2.TRIB_LEAD
+    local t0=os.clock()
+    while Workspace:GetServerTimeNow()<target and os.clock()-t0<10 do task.wait() end
+    local offset=Workspace:GetServerTimeNow()-b.hitTime
+    CU2.fire("Tribulation","absorb",b.idx,offset)
+    b.offset=offset
+    b.answer="absorb"
+    if t then t.answered+=1 end
+    CU_LOG.count("Tribulacao: absorb enviado no horario do raio")
+    CU_LOG.add("TRIBULACAO","raio "..tostring(b.idx),string.format("absorb enviado com %+.3fs do horario (o evento chegou %.2fs antes; tipo %s, janela %s)",
+        offset,b.lead or -1,b.kind,tostring(b.window)),0)
+    return true
+end
+function CU2.onDeathCause(cause)
+    local line=string.format("%s causa da morte (servidor): %s%s | ligado: %s",os.date("%H:%M:%S"),tostring(cause),
+        CU2.trib and string.format(" | tribulacao em andamento: %d raios, %d acertos, %d erros",#CU2.trib.order,CU2.trib.hits,CU2.trib.misses) or "",
+        CU_LOG.activeList())
+    CU2.deaths[#CU2.deaths+1]=line
+    if #CU2.deaths>20 then table.remove(CU2.deaths,1) end
+    CU_LOG.count("Mortes: causa "..tostring(cause))
+    CU_LOG.add("MORTE","causa",line,0)
+end
+-- Mensagens do servidor (GlobalMessage): agrupadas com os numeros trocados por #, com um exemplo e quantas vezes.
+function CU2.onServerMessage(text)
+    text=CU_LOG.clean(tostring(text),200)
+    local key=text:gsub("%d+","#")
+    local m=CU2.serverMsgs[key]
+    if not m then
+        m={count=0}
+        CU2.serverMsgs[key]=m
+        CU2.serverMsgOrder[#CU2.serverMsgOrder+1]=key
+        CU_LOG.add("SERVIDOR","mensagem",text,0)
+    end
+    m.count+=1
+    m.last=os.date("%H:%M:%S")
+    m.example=text
+end
+
 -- Plataforma invisivel embaixo do personagem (Top76): segura o personagem nas posicoes embaixo da terra.
 function CU2.getPlatform()
     local p=CU2.platform
@@ -1059,6 +1164,21 @@ function CU2.sections()
     if #CU2.fights>0 then text=text.."[LUTAS: ultimas "..#CU2.fights.."]\n"..table.concat(CU2.fights,"\n").."\n\n" end
     if #CU2.deaths>0 then text=text.."[MORTES: "..#CU2.deaths.."]\n"..table.concat(CU2.deaths,"\n").."\n\n" end
     if #CU2.events>0 then text=text.."[SECT CLASH]\n"..table.concat(CU2.events,"\n").."\n\n" end
+    if #CU2.tribs>0 or CU2.trib then
+        local cur=CU2.trib and string.format("\nem andamento desde %s: %d raios, %d acertos, %d erros",CU2.trib.startStamp,#CU2.trib.order,CU2.trib.hits,CU2.trib.misses) or ""
+        text=text.."[TRIBULACAO: Auto Tribulation "..(CU2.on("tribulation") and "ligado" or "DESLIGADO").."]\n"..table.concat(CU2.tribs,"\n")..cur.."\n\n"
+    end
+    if #CU2.serverMsgOrder>0 then
+        local keys={}
+        for _,k in ipairs(CU2.serverMsgOrder) do keys[#keys+1]=k end
+        table.sort(keys,function(a,b) return CU2.serverMsgs[a].count>CU2.serverMsgs[b].count end)
+        local out2={}
+        for i=1,math.min(12,#keys) do
+            local m=CU2.serverMsgs[keys[i]]
+            out2[#out2+1]=string.format("x%d (ultima %s): %s",m.count,m.last,m.example)
+        end
+        text=text.."[MENSAGENS DO SERVIDOR: GlobalMessage, mais frequentes]\n"..table.concat(out2,"\n").."\n\n"
+    end
     return text
 end
 function CU2.safeSections()
@@ -1385,7 +1505,7 @@ do
     titleText.Size = UDim2.new(1, -100, 1, 0)
     titleText.Position = UDim2.new(0, 15, 0, 0)
     titleText.BackgroundTransparency = 1
-    titleText.Text = "Cultivation Hub | CU2 (Top76 + log)"
+    titleText.Text = "Cultivation Hub | CU2.2 (Top76 + log)"
     titleText.TextColor3 = Color3.fromRGB(220, 220, 220)
     titleText.TextSize = 14
     titleText.Font = Enum.Font.GothamBold
@@ -4140,18 +4260,6 @@ function CU2.soulLoop()
 end
 
 -- ===== CULTIVO PELO SERVIDOR (Top76) =====
-function CU2.tribulationLoop()
-    while CU2.on("tribulation") do
-        local _,_,hum=CU2.char()
-        if hum and hum.Health>hum.MaxHealth*0.3 then
-            CU2.fire("Tribulation",table.unpack(CU2.TRIBULATION_ARGS))
-            CU_LOG.count("Tribulation: absorb enviado")
-        else
-            CU_LOG.count("Tribulation: esperando (vida abaixo de 30%)")
-        end
-        task.wait(1)
-    end
-end
 function CU2.bodyBreakLoop()
     while CU2.on("bodyBreak") do
         local _,_,hum=CU2.char()
@@ -4484,7 +4592,6 @@ CU2.LOOPS={
     sectClash={"Sect Clash",CU2.clashLoop},
     blindBreak={"Breakthrough as cegas",CU2.blindBreakLoop},
     bodyBreak={"Body Breakthrough servidor",CU2.bodyBreakLoop},
-    tribulation={"Tribulation",CU2.tribulationLoop},
     soul={"Soul Projection",CU2.soulLoop},
     orbTouch={"Orbs servidor",CU2.orbLoop},
     herb2={"Ervas mapa todo",CU2.herb2Loop},
@@ -4550,6 +4657,21 @@ do
         end
     end)
     listen("MapEvent",function(action,payload) CU2.onMapEvent(action,payload) end)
+    -- Tribulacao, causa da morte e mensagens do servidor: continuam gravando mesmo com a janela fechada (so o log).
+    local function watch(name,fn)
+        local r=CU2.remote(name)
+        if r and r:IsA("RemoteEvent") then
+            r.OnClientEvent:Connect(function(...) CU_LOG.try("Ouvinte "..name,fn,...) end)
+        else
+            CU_LOG.add("AVISO","CU2","ouvinte "..name.." nao ligado: o remote nao existe",0)
+        end
+    end
+    watch("Tribulation",function(...)
+        local bolt=CU2.onTribulation(...)
+        if bolt then CU2.answerBolt(bolt) end
+    end)
+    watch("DeathCause",function(...) CU2.onDeathCause(...) end)
+    watch("GlobalMessage",function(text) CU2.onServerMessage(text) end)
 end
 
 -- ===== ABAS "COMBATE" E "EXTRA" =====
@@ -4813,7 +4935,7 @@ do
         toggle(e,"Pular minijogo do Breakthrough","skipTrial")
         toggle(e,"Breakthrough as cegas (a cada 2s)","blindBreak")
         toggle(e,"Auto Body Breakthrough (servidor)","bodyBreak")
-        toggle(e,"Auto Tribulation","tribulation")
+        toggle(e,"Auto Tribulation (acerta cada raio)","tribulation")
         toggle(e,"Soul Projection + pegar espiritos","soul")
         label(e,"Soul: desligado","soul",34)
         toggle(e,"Orbs de Qi pelo servidor","orbTouch")
